@@ -567,6 +567,17 @@ func runChecks() -> Int32 {
     "explicit port label"
   )
 
+  // MARK: Spin arc
+
+  // The spin is a shape layer of our own, anchored at its centre. Assert the path
+  // is the arc the static glyph draws, centred in the 18pt box.
+  let spinArc = StatusIcon.spinArcPath()
+  checks.check(!spinArc.isEmpty, "the spin arc is a real path")
+  let arcBox = spinArc.boundingBox
+  checks.check(arcBox.width > 9.5 && arcBox.width < 11, "the spin arc spans the glyph")
+  checks.check(arcBox.midX > 8.9 && arcBox.midX < 9.1, "the spin arc is centred horizontally")
+  checks.check(arcBox.midY > 8.9 && arcBox.midY < 9.1, "the spin arc is centred vertically")
+
   // MARK: Menu bar glyphs
 
   checks.check(StatusIcon.frames(for: .starting, owner: .dshBar) != nil, "starting animates")

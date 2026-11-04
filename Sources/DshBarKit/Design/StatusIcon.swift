@@ -37,6 +37,27 @@ public enum StatusIcon {
     }
   }
 
+  /// The starting/stopping arc as a `CGPath`, so the same shape can be drawn by
+  /// a `CAShapeLayer` and rotated by Core Animation.
+  ///
+  /// The menu bar glyph is a *template* image: the system recolours it, but a
+  /// layer's `contents` are raw pixels. Drawing the arc as a shape keeps the
+  /// colour under our control and, more importantly, puts the rotation on a
+  /// layer whose anchor point we own — the status button's own layer is anchored
+  /// at `(0, 0)`, and rotating that swings the glyph out of the menu bar.
+  public static func spinArcPath(side: CGFloat = 18) -> CGPath {
+    let center = CGPoint(x: side / 2, y: side / 2)
+    let path = CGMutablePath()
+    path.addArc(
+      center: center,
+      radius: 5.2,
+      startAngle: 0,
+      endAngle: CGFloat(265.0 * Double.pi / 180),
+      clockwise: false
+    )
+    return path
+  }
+
   /// Frames a transitional glyph passes through. The app spins one static arc
   /// with Core Animation; these frames document that motion and are what the
   /// review sheets draw, so what is reviewed stays true to what ships.

@@ -11,6 +11,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
   private var statusItem: NSStatusItem!
   private var cancellables = Set<AnyCancellable>()
   private var animationTimer: Timer?
+  private var spinShape: CAShapeLayer?
   private var frameIndex = 0
   private var lastKey: String?
 
@@ -114,22 +115,55 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     animationTimer = timer
   }
 
+  /// The transitional glyph is a `CAShapeLayer` of our own, not the button's
+  /// layer: AppKit anchors a view's own layer at `(0, 0)`, so rotating it turns
+  /// the icon around the button's corner and throws it out of the menu bar. A
+  /// sublayer we create is anchored at its centre, which is what "spin in place"
+  /// needs.
   private func startSpin(on button: NSStatusBarButton, clockwise: Bool, secondsPerTurn: Double) {
+    stopSpinShape()
     button.wantsLayer = true
-    guard let layer = button.layer else { return }
+    guard let host = button.layer else { return }
+
+    let side: CGFloat = 18
+    let isDark = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    let center = host.bounds.isEmpty
+      ? CGPoint(x: side / 2, y: side / 2)
+      : CGPoint(x: host.bounds.midX, y: host.bounds.midY)
+
+    let shape = CAShapeLayer()
+    shape.bounds = CGRect(x: 0, y: 0, width: side, height: side)
+    shape.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+    shape.position = center
+    shape.path = StatusIcon.spinArcPath(side: side)
+    shape.fillColor = nil
+    shape.strokeColor = (isDark ? NSColor.white : NSColor.black).cgColor
+    shape.lineWidth = 1.6
+    shape.lineCap = .round
+    host.addSublayer(shape)
+    spinShape = shape
+
+    // The template image would draw a second, static glyph underneath.
+    button.image = nil
+
     let spin = CABasicAnimation(keyPath: "transform.rotation.z")
     spin.fromValue = 0
     spin.toValue = (clockwise ? -1.0 : 1.0) * 2 * Double.pi
     spin.duration = secondsPerTurn
     spin.repeatCount = .infinity
     spin.isRemovedOnCompletion = false
-    layer.add(spin, forKey: "dsh.spin")
+    shape.add(spin, forKey: "dsh.spin")
+  }
+
+  private func stopSpinShape() {
+    spinShape?.removeFromSuperlayer()
+    spinShape = nil
   }
 
   private func stopAnimation() {
     animationTimer?.invalidate()
     animationTimer = nil
-    statusItem?.button?.layer?.removeAnimation(forKey: "dsh.spin")
+    stopSpinShape()
   }
 
   @objc private func handleClick() {

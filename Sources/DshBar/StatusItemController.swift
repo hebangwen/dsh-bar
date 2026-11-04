@@ -11,9 +11,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
   private var statusItem: NSStatusItem!
   private var cancellables = Set<AnyCancellable>()
   private var animationTimer: Timer?
-  private var spinShape: CAShapeLayer?
+  /// Layers the app owns while a state animates. They are never the button's own
+  /// layer: AppKit anchors that one at `(0, 0)`, which turns any rotation into a
+  /// swing around the button's corner.
+  private var artLayers: [CALayer] = []
   private var frameIndex = 0
   private var lastKey: String?
+  private var themeObserver: NSObjectProtocol?
 
   var button: NSStatusBarButton? { statusItem?.button }
 
@@ -30,6 +34,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     super.init()
   }
 
+  deinit {
+    if let themeObserver {
+      DistributedNotificationCenter.default.removeObserver(themeObserver)
+    }
+  }
+
   func install() {
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     guard let button = statusItem.button else { return }
@@ -40,6 +50,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     model.$snapshot
       .sink { [weak self] snapshot in self?.apply(snapshot) }
       .store(in: &cancellables)
+
+    // A layer's colour is fixed when it is created, so a menu bar that flips
+    // between light and dark needs the glyph rebuilt in the new colour.
+    themeObserver = DistributedNotificationCenter.default.addObserver(
+      forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"),
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        self.lastKey = nil
+        self.apply(self.model.snapshot)
+      }
+    }
   }
 
   private func apply(_ snapshot: HarnessSnapshot) {
@@ -75,19 +99,32 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         clockwise: snapshot.phase == .starting,
         secondsPerTurn: snapshot.phase == .starting ? 1.1 : 1.4
       )
-    } else if snapshot.phase == .listening, hadPrevious {
-      play(
-        StatusIcon.arrivalPulse(for: snapshot.owner),
-        settlingOn: StatusIcon.image(for: .listening, owner: snapshot.owner)
-      )
+    } else if snapshot.phase == .listening {
+      if snapshot.owner == .external {
+        button.image = StatusIcon.image(for: .listening, owner: .external)
+      } else if hadPrevious {
+        // One arrival pulse, then settle into the slow breath.
+        play(StatusIcon.arrivalPulse(for: snapshot.owner), settlingOn: nil) { [weak self] in
+          guard let self, let button = self.statusItem.button else { return }
+          self.startListeningBreathe(on: button)
+        }
+      } else {
+        startListeningBreathe(on: button)
+      }
     } else {
       button.image = StatusIcon.image(for: snapshot.phase, owner: snapshot.owner)
     }
   }
 
+  // MARK: - Motion
+
   /// Cycles 18pt frames at 20 fps — cheap enough to only run while a state is
   /// actually changing, and it stops on the frame that settles the state.
-  private func play(_ frames: [NSImage], settlingOn settle: NSImage?) {
+  private func play(
+    _ frames: [NSImage],
+    settlingOn settle: NSImage?,
+    completion: (() -> Void)? = nil
+  ) {
     guard let first = frames.first, let button = statusItem.button else { return }
     button.image = first
     frameIndex = 0
@@ -101,11 +138,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if self.frameIndex >= frames.count {
           if let settle {
             button.image = settle
-            self.stopAnimation()
-          } else {
-            self.frameIndex = 0
-            button.image = frames[0]
           }
+          self.stopAnimation()
+          completion?()
           return
         }
         button.image = frames[self.frameIndex]
@@ -121,27 +156,22 @@ final class StatusItemController: NSObject, NSMenuDelegate {
   /// sublayer we create is anchored at its centre, which is what "spin in place"
   /// needs.
   private func startSpin(on button: NSStatusBarButton, clockwise: Bool, secondsPerTurn: Double) {
-    stopSpinShape()
+    stopArt()
     button.wantsLayer = true
     guard let host = button.layer else { return }
 
     let side: CGFloat = 18
-    let isDark = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-    let center = host.bounds.isEmpty
-      ? CGPoint(x: side / 2, y: side / 2)
-      : CGPoint(x: host.bounds.midX, y: host.bounds.midY)
-
     let shape = CAShapeLayer()
     shape.bounds = CGRect(x: 0, y: 0, width: side, height: side)
     shape.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-    shape.position = center
+    shape.position = glyphCenter(in: host, side: side)
     shape.path = StatusIcon.spinArcPath(side: side)
     shape.fillColor = nil
-    shape.strokeColor = (isDark ? NSColor.white : NSColor.black).cgColor
+    shape.strokeColor = glyphColor(for: button).cgColor
     shape.lineWidth = 1.6
     shape.lineCap = .round
     host.addSublayer(shape)
-    spinShape = shape
+    artLayers = [shape]
 
     // The template image would draw a second, static glyph underneath.
     button.image = nil
@@ -155,16 +185,77 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     shape.add(spin, forKey: "dsh.spin")
   }
 
-  private func stopSpinShape() {
-    spinShape?.removeFromSuperlayer()
-    spinShape = nil
+  /// While the server is up, the dot breathes: it is the one piece of motion the
+  /// app keeps running, so "alive" stays readable at a glance. Ring and dot are
+  /// separate layers, so only the dot changes size.
+  private func startListeningBreathe(on button: NSStatusBarButton) {
+    stopArt()
+    button.wantsLayer = true
+    guard let host = button.layer else { return }
+
+    let side: CGFloat = 18
+    let center = glyphCenter(in: host, side: side)
+    let color = glyphColor(for: button).cgColor
+
+    let ring = CAShapeLayer()
+    ring.bounds = CGRect(x: 0, y: 0, width: side, height: side)
+    ring.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+    ring.position = center
+    ring.path = StatusIcon.listeningRingPath(side: side)
+    ring.fillColor = nil
+    ring.strokeColor = color
+    ring.lineWidth = 1.5
+    host.addSublayer(ring)
+
+    let dot = CAShapeLayer()
+    dot.bounds = CGRect(x: 0, y: 0, width: side, height: side)
+    dot.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+    dot.position = center
+    dot.path = StatusIcon.listeningDotPath(side: side)
+    dot.fillColor = color
+    host.addSublayer(dot)
+
+    let breathe = CABasicAnimation(keyPath: "transform.scale")
+    breathe.fromValue = 1.0
+    breathe.toValue = 1.32
+    breathe.duration = 1.15
+    breathe.autoreverses = true
+    breathe.repeatCount = .infinity
+    breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+    dot.add(breathe, forKey: "dsh.breathe")
+
+    artLayers = [ring, dot]
+    button.image = nil
+  }
+
+  private func stopArt() {
+    for layer in artLayers {
+      layer.removeFromSuperlayer()
+    }
+    artLayers = []
   }
 
   private func stopAnimation() {
     animationTimer?.invalidate()
     animationTimer = nil
-    stopSpinShape()
+    stopArt()
   }
+
+  private func glyphCenter(in host: CALayer, side: CGFloat) -> CGPoint {
+    host.bounds.isEmpty
+      ? CGPoint(x: side / 2, y: side / 2)
+      : CGPoint(x: host.bounds.midX, y: host.bounds.midY)
+  }
+
+  /// Template images take their colour from the menu bar; a layer's contents do
+  /// not, so the colour is resolved from the button's own appearance.
+  private func glyphColor(for button: NSStatusBarButton) -> NSColor {
+    button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+      ? .white
+      : .black
+  }
+
+  // MARK: - Menu
 
   @objc private func handleClick() {
     if NSApp.currentEvent?.type == .rightMouseUp {
@@ -185,7 +276,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     menu.addItem(.separator())
 
     // Preview scenes are a design tool: they exist only in demo mode, so a real
-    // user can never put the panel into a state the process is not in.
+    // user can never put the panel into a state the panel's process is not in.
     if model.demoMode {
       let scenes = NSMenu()
       for scene in DemoScene.allCases {

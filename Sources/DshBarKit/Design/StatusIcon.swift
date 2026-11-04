@@ -58,6 +58,26 @@ public enum StatusIcon {
     return path
   }
 
+  /// The listening glyph split into ring and dot, so the dot can breathe while
+  /// the ring stays put. Same radii the static image draws.
+  public static func listeningRingPath(side: CGFloat = 18) -> CGPath {
+    let center = CGPoint(x: side / 2, y: side / 2)
+    let path = CGMutablePath()
+    path.addEllipse(
+      in: CGRect(x: center.x - 5.6, y: center.y - 5.6, width: 11.2, height: 11.2)
+    )
+    return path
+  }
+
+  public static func listeningDotPath(side: CGFloat = 18) -> CGPath {
+    let center = CGPoint(x: side / 2, y: side / 2)
+    let path = CGMutablePath()
+    path.addEllipse(
+      in: CGRect(x: center.x - 2.4, y: center.y - 2.4, width: 4.8, height: 4.8)
+    )
+    return path
+  }
+
   /// Frames a transitional glyph passes through. The app spins one static arc
   /// with Core Animation; these frames document that motion and are what the
   /// review sheets draw, so what is reviewed stays true to what ships.

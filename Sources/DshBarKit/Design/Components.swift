@@ -84,6 +84,13 @@ public struct RingLamp: View {
           Circle()
             .fill(palette.ink)
             .frame(width: 6.5, height: 6.5)
+            // The same breath the menu bar glyph has: while the server is up the
+            // dot swells and settles, so "alive" reads without a second glance.
+            .phaseAnimator([false, true], trigger: phase) { view, expanded in
+              view.scaleEffect(expanded ? 1.3 : 0.82)
+            } animation: { _ in
+              .easeInOut(duration: 1.15)
+            }
         }
       case .stopping:
         Circle()

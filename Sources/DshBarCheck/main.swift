@@ -578,6 +578,13 @@ func runChecks() -> Int32 {
   checks.check(arcBox.midX > 8.9 && arcBox.midX < 9.1, "the spin arc is centred horizontally")
   checks.check(arcBox.midY > 8.9 && arcBox.midY < 9.1, "the spin arc is centred vertically")
 
+  // The listening glyph is two shapes so the dot can breathe alone.
+  let listenRing = StatusIcon.listeningRingPath()
+  let listenDot = StatusIcon.listeningDotPath()
+  checks.check(abs(listenRing.boundingBox.width - 11.2) < 0.2, "the listening ring is 11.2 wide")
+  checks.check(abs(listenDot.boundingBox.width - 4.8) < 0.2, "the listening dot is 4.8 wide")
+  checks.check(abs(listenDot.boundingBox.midX - 9) < 0.1, "the dot is centred")
+
   // MARK: Menu bar glyphs
 
   checks.check(StatusIcon.frames(for: .starting, owner: .dshBar) != nil, "starting animates")

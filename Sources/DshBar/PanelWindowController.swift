@@ -79,10 +79,10 @@ final class PanelWindowController: NSObject {
 
   func show(relativeTo button: NSStatusBarButton?) {
     anchorButton = button
+    isVisible = true
     resync(animated: false)
     NSApp.activate(ignoringOtherApps: true)
     window.makeKeyAndOrderFront(nil)
-    isVisible = true
 
     // `DSHBAR_SNAPSHOT_WINDOW=<path>` writes exactly what the window draws, so
     // layout and clipping can be checked without a screen recording grant.
@@ -115,6 +115,9 @@ final class PanelWindowController: NSObject {
   /// Tracks the SwiftUI content height and keeps the panel pinned under the
   /// status item, clamped to the screen.
   private func resync(animated: Bool) {
+    // The uptime tick publishes every second; laying out a hidden window for it
+    // is wasted work.
+    guard isVisible else { return }
     hosting.layoutSubtreeIfNeeded()
     let height = max(120, ceil(hosting.fittingSize.height))
     let size = NSSize(width: Metrics.panelWidth, height: height)

@@ -526,6 +526,47 @@ func runChecks() -> Int32 {
   let (foundState, _) = HarnessReducer.reduce(missingState, .detected(path: "/x/dsh"), language: .en)
   checks.equal(foundState.snapshot.phase, .stopped, "a later detection recovers")
 
+  // MARK: Reducer — a stop that did not take
+
+  let externalListening = HarnessReducer.reduce(state, .portChecked(.dsh, port: 3099), language: .en).0
+  let externalStopping = HarnessReducer.reduce(externalListening, .stopRequested, language: .en).0
+  let (stopFailedState, stopFailedCommands) = HarnessReducer.reduce(
+    externalStopping,
+    .stopFailed(port: 3099, detail: "pid 42 is not a dsh this app may stop"),
+    language: .en
+  )
+  checks.equal(stopFailedState.snapshot.phase, .failed, "a failed external stop fails")
+  checks.equal(stopFailedState.snapshot.failure?.port, 3099, "a failed stop names the port")
+  checks.equal(
+    stopFailedState.snapshot.failure?.detail,
+    "pid 42 is not a dsh this app may stop",
+    "a failed stop keeps its reason"
+  )
+  checks.check(!stopFailedState.intentionalStop, "a failed stop clears the intent flag")
+  checks.equal(stopFailedCommands, [.stopUptime, .disarmReadyTimeout], "a failed stop stops the clock")
+
+  // A startup-failure line only means something to a start that is still running.
+  let (withDetail, _) = HarnessReducer.reduce(
+    state,
+    .launch(.startupFailed(detail: "boom")),
+    language: .en
+  )
+  checks.equal(withDetail.pendingDetail, "boom", "a startup failure is remembered while starting")
+  let (lateDetail, lateDetailCommands) = HarnessReducer.reduce(
+    readyState,
+    .launch(.startupFailed(detail: "late")),
+    language: .en
+  )
+  checks.equal(lateDetail, readyState, "a late startup-failure line is ignored")
+  checks.equal(lateDetailCommands, [], "a late startup-failure line runs nothing")
+  let (clearedDetail, _) = HarnessReducer.reduce(
+    withDetail,
+    .launch(.ready(report)),
+    language: .en,
+    now: t0
+  )
+  checks.equal(clearedDetail.pendingDetail, nil, "a ready launch clears the remembered failure")
+
   // MARK: Reducer — external observation
 
   // A server started in a terminal must appear without the user pressing Start.
@@ -572,6 +613,23 @@ func runChecks() -> Int32 {
   ).0
   let (ownedExternal, _) = HarnessReducer.reduce(owned, .observedExternal(port: 3099), language: .en)
   checks.equal(ownedExternal.snapshot.phase, .starting, "observing does not hijack a start in progress")
+
+  // MARK: Reducer — preferences
+
+  let (movedPort, movedCommands) = HarnessReducer.reduce(
+    HarnessState(),
+    .preferencesChanged(port: 3099, profile: "tui"),
+    language: .en
+  )
+  checks.equal(movedPort.snapshot.port, 3099, "a preferences change follows the new port")
+  checks.equal(movedPort.snapshot.profile, "tui", "a preferences change follows the new profile")
+  checks.equal(movedCommands, [], "a preferences change runs nothing")
+  let (busyPort, _) = HarnessReducer.reduce(
+    seenExternal,
+    .preferencesChanged(port: 3099, profile: "web"),
+    language: .en
+  )
+  checks.equal(busyPort, seenExternal, "a preferences change cannot move a listening server")
 
   // MARK: Child process guard
 
@@ -632,23 +690,7 @@ func runChecks() -> Int32 {
     "explicit port label"
   )
 
-  // MARK: Spin arc
-
-  // The spin is a shape layer of our own, anchored at its centre. Assert the path
-  // is the arc the static glyph draws, centred in the 18pt box.
-  let spinArc = StatusIcon.spinArcPath()
-  checks.check(!spinArc.isEmpty, "the spin arc is a real path")
-  let arcBox = spinArc.boundingBox
-  checks.check(arcBox.width > 9.5 && arcBox.width < 11, "the spin arc spans the glyph")
-  checks.check(arcBox.midX > 8.9 && arcBox.midX < 9.1, "the spin arc is centred horizontally")
-  checks.check(arcBox.midY > 8.9 && arcBox.midY < 9.1, "the spin arc is centred vertically")
-
-  // The listening glyph is two shapes so the dot can breathe alone.
-  let listenRing = StatusIcon.listeningRingPath()
-  let listenDot = StatusIcon.listeningDotPath()
-  checks.check(abs(listenRing.boundingBox.width - 11.2) < 0.2, "the listening ring is 11.2 wide")
-  checks.check(abs(listenDot.boundingBox.width - 4.8) < 0.2, "the listening dot is 4.8 wide")
-  checks.check(abs(listenDot.boundingBox.midX - 9) < 0.1, "the dot is centred")
+  // MARK: Baked glyphs
 
   // Layers animate baked bitmaps, not paths: a missing bitmap would leave the
   // menu bar blank while a state is changing.

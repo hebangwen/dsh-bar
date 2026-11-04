@@ -84,11 +84,11 @@ macOS 菜单栏里的 dsh 管理器：把 `dsh --profile web` 挂在它下面，
 | 启动中 | 缺口环顺时针旋转，1.1 秒一圈 |
 | 停止中 | 同一个环反向旋转，1.4 秒一圈 |
 | 刚刚就绪 | 中心圆点膨胀再收回，一次 0.4 秒 |
-| 正在监听 | 中心圆点呼吸：1.0 ↔ 1.32，单程 1.15 秒，一直呼吸 |
+| 正在监听 | 中心圆点呼吸：1.0 ↔ 1.26，单程 1.3 秒，一直呼吸 |
 
-正在监听时的呼吸是唯一常驻的动效：它说明服务还活着，而不是说明状态在变。环和点分成两层，只有点缩放，环保持不动。面板里的指示灯用同一个节奏（`phaseAnimator`），两处看起来是同一台设备。
+正在监听时的呼吸是唯一常驻的动效：它说明服务还活着，而不是说明状态在变。菜单栏里环是静态的模板图、点是一张会缩放的位图，所以只有点在动。面板里的指示灯用同样的节奏（`phaseAnimator`，0.86 ↔ 1.24、1.15 秒），两处看起来是同一台设备。
 
-还有一个踩过的坑：AppKit 给 view 自己的 backing layer 用的是 `(0, 0)` 锚点（坐标系从底左角起算），而 Core Animation 的 `transform.rotation.z` 是绕锚点转的——把旋转直接加到按钮图层上，图标会绕着按钮左下角甩出菜单栏；把按钮图层的锚点改成中心又会被下一次 layout 冲掉。所以过渡态不用按钮自己的图层：启动/停止时插入一个自建的 `CAShapeLayer`，用 `StatusIcon.spinArcPath` 画同一个缺口环（半径 5.2、线宽 1.6、265°），锚点天然在中心；颜色按当前菜单栏外观取黑或白，因为模板图的自动着色搬到图层上就没了。旋转因此永远绕图标中心。
+还有一个踩过的坑：AppKit 给 view 自己的 backing layer 用的是 `(0, 0)` 锚点（坐标系从底左角起算），而 Core Animation 的 `transform.rotation.z` 是绕锚点转的——把旋转直接加到按钮图层上，图标会绕着按钮左下角甩出菜单栏；把按钮图层的锚点改成中心又会被下一次 layout 冲掉。所以过渡态不用按钮自己的图层：启动/停止时插入一个自建的 `CALayer`，里面是一张预先烘焙好的 2x 位图纹理（和静态图标同一支缺口环，半径 5.2、线宽 1.6、265°），锚点天然在中心；颜色按当前菜单栏外观取黑或白，因为模板图的自动着色搬到图层上就没了。旋转因此永远绕图标中心。
 
 实现上踩了两个层级：
 
@@ -115,7 +115,7 @@ open "build/dsh bar.app"        # 菜单栏出现图标，点开就是面板
 开发与验证：
 
 ```sh
-swift run dshbar-check                            # 230 项校验：文案、状态谓词、解析、状态机、fixture、图标帧
+swift run dshbar-check                            # 248 项校验：文案、状态谓词、解析、状态机、fixture、图标帧
 swift run dshbar-smoke --port 3099                # 真机端到端：定位 → 启动 → 校验 URL/401 → 停止 → 端口释放
 swift run dshbar-smoke --external --port 3099     # 接管前半段：lsof 找 pid → ps 校验命令行 → SIGTERM → 端口释放
 swift run dshbar-snap docs/design                 # 离屏渲染所有状态 → PNG（浅/深 × 中/英）
@@ -158,7 +158,7 @@ Sources/DshBar/               菜单栏 app：NSStatusItem + NSPanel + SwiftUI
   DemoBackend.swift           演示驱动（fixture 状态，供设计评审）
 Sources/DshBarSnapshot/       离屏出图工具（ImageRenderer → PNG）
 Sources/DshBarSmoke/          真机端到端验证（启动 → 校验 → 停止）
-Sources/DshBarCheck/          230 项断言的可执行检查（不依赖 XCTest / Xcode）
+Sources/DshBarCheck/          248 项断言的可执行检查（不依赖 XCTest / Xcode）
 scripts/                      build-app.sh / make-icon.swift
 docs/design/                  外观图（评审用）
 ```

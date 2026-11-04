@@ -14,6 +14,8 @@ protocol HarnessBackend: AnyObject {
   func stop()
   func cancel()
   func redetect() -> DshLookup
+  /// Settings changed: the backend must not keep a stale copy.
+  func update(_ preferences: BarPreferences)
   /// Look at the port and report whether a dsh someone else started is there.
   func refreshExternal()
   func preview(_ scene: DemoScene)
@@ -100,6 +102,7 @@ final class HarnessModel: ObservableObject {
     backend.onSnapshot = { [weak self] snapshot in
       guard let self else { return }
       self.snapshot = snapshot
+      self.adoptPort()
       self.didSettle()
     }
     applyAppearance()
@@ -239,6 +242,9 @@ final class HarnessModel: ObservableObject {
     next.save()
     snapshot.port = next.port
     snapshot.profile = next.profile
+    // The backend owns its own copy; without this a newly chosen dsh path would
+    // be ignored until the next launch.
+    backend.update(next)
   }
 
   // MARK: - Detection
@@ -315,6 +321,17 @@ final class HarnessModel: ObservableObject {
   /// Called on every snapshot. A restart is two steps — stop, then start from the
   /// settled state — rather than a guessed delay, because the process is the only
   /// thing that knows when the port is free again.
+  /// `--port 0` lets the OS choose; whatever it chose is now the truth, so the
+  /// preference (and the footer) must follow it.
+  private func adoptPort() {
+    guard snapshot.phase == .listening, snapshot.owner == .dshBar else { return }
+    guard snapshot.port != preferences.port else { return }
+    var next = preferences
+    next.port = snapshot.port
+    preferences = next
+    next.save()
+  }
+
   private func didSettle() {
     guard restartWhenStopped else { return }
     switch snapshot.phase {
@@ -332,6 +349,7 @@ final class HarnessModel: ObservableObject {
       backend.start(port: port, profile: preferences.profile)
     case .failed:
       restartWhenStopped = false
+      restartPort = nil
     default:
       break
     }

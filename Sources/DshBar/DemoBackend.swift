@@ -97,6 +97,11 @@ final class DemoBackend: HarnessBackend {
     publish(next)
   }
 
+  func update(_ preferences: BarPreferences) {
+    port = preferences.port
+    profile = preferences.profile
+  }
+
   func refreshExternal() {}
 
   func redetect() -> DshLookup {

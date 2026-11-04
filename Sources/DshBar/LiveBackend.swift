@@ -42,11 +42,31 @@ final class LiveBackend: HarnessBackend {
     snapshot.lastRun = nil
     state = HarnessState(snapshot: snapshot)
     startWatching()
+    // The first Start should not pay for a shell launch, and a hung rc file must
+    // not be able to block the click.
+    probeQueue.async { [weak self] in
+      let resolved = LoginShellEnvironment.resolve()
+      DispatchQueue.main.async {
+        MainActor.assumeIsolated {
+          guard let self, self.environment == nil else { return }
+          self.environment = resolved.values
+          self.environmentDate = Date()
+        }
+      }
+    }
   }
 
   // MARK: - HarnessBackend
 
+  func update(_ preferences: BarPreferences) {
+    self.preferences = preferences
+    dispatch(.preferencesChanged(port: preferences.port, profile: preferences.profile))
+  }
+
   func start(port: Int, profile: String) {
+    // A child from a previous attempt may still be alive (it can ignore SIGTERM);
+    // a second one would fight it for the same session store.
+    if let child, child.isAlive { return }
     let normalizedPort = BarPreferences.normalizePort(port)
     let normalizedProfile = BarPreferences.normalizeProfile(profile)
     preferences.port = normalizedPort
@@ -92,6 +112,9 @@ final class LiveBackend: HarnessBackend {
   /// panel opens, after the port changes, and on a slow timer, so a `dsh web`
   /// started in a terminal appears in the panel by itself.
   func refreshExternal() {
+    // A child we own is not an external instance, even if the reducer has already
+    // moved on (cancel, timeout) while the process is still alive.
+    guard child == nil else { return }
     let phase = state.snapshot.phase
     guard phase == .stopped || (phase == .listening && state.snapshot.owner == .external) else {
       return
@@ -289,8 +312,15 @@ final class LiveBackend: HarnessBackend {
     stopTimer?.invalidate()
     let timer = Timer(timeInterval: TimeInterval(HarnessReducer.stopGrace), repeats: false) { [weak self] _ in
       MainActor.assumeIsolated {
-        guard let self, self.state.snapshot.phase == .stopping else { return }
-        self.dispatch(.killTimedOut)
+        guard let self else { return }
+        if self.state.snapshot.phase == .stopping {
+          self.dispatch(.killTimedOut)
+        } else if let child = self.child, child.isAlive {
+          // `.cancel`, `.readyTimeout` and a launch-time port race also send
+          // SIGTERM, but the reducer has already left `.stopping`, so it will
+          // never ask for the escalation itself.
+          child.kill()
+        }
         self.armKillTimeout()
       }
     }
@@ -304,9 +334,11 @@ final class LiveBackend: HarnessBackend {
     killTimer?.invalidate()
     let timer = Timer(timeInterval: 2, repeats: false) { [weak self] _ in
       MainActor.assumeIsolated {
-        guard let self, self.state.snapshot.phase == .stopping else { return }
-        self.child?.kill()
-        self.dispatch(.exited(code: nil, signal: SIGKILL))
+        guard let self, let child = self.child, child.isAlive else { return }
+        child.kill()
+        if self.state.snapshot.phase == .stopping {
+          self.dispatch(.exited(code: nil, signal: SIGKILL))
+        }
       }
     }
     RunLoop.main.add(timer, forMode: .common)
@@ -332,7 +364,13 @@ final class LiveBackend: HarnessBackend {
         MainActor.assumeIsolated {
           self.writer.note(detail)
           self.append(line: detail, stream: .err)
-          self.dispatch(.exited(code: stopped ? 0 : nil, signal: stopped ? nil : SIGTERM))
+          if stopped {
+            self.dispatch(.exited(code: 0, signal: nil))
+          } else {
+            // The port is still held. Reporting `.exited` here would claim a clean
+            // stop, persist the port, and retry a start that cannot win.
+            self.dispatch(.stopFailed(port: port, detail: detail))
+          }
         }
       }
     }
@@ -385,6 +423,8 @@ final class LogFileWriter {
   let url: URL
   private let lock = NSLock()
   private var handle: FileHandle?
+  private var written = 0
+  private static let limit = 1_048_576
 
   init(url: URL = DshBarPaths.logFile) {
     self.url = url
@@ -415,12 +455,30 @@ final class LogFileWriter {
   private func append(_ text: String) {
     lock.lock()
     defer { lock.unlock() }
-    if handle == nil {
-      handle = try? FileHandle(forWritingTo: url)
-      _ = try? handle?.seekToEnd()
-    }
+    openIfNeeded()
     guard let data = text.data(using: .utf8) else { return }
     try? handle?.write(contentsOf: data)
+    written += data.count
+    if written > Self.limit {
+      rotateLocked()
+    }
+  }
+
+  private func openIfNeeded() {
+    guard handle == nil else { return }
+    handle = try? FileHandle(forWritingTo: url)
+    _ = try? handle?.seekToEnd()
+  }
+
+  private func rotateLocked() {
+    try? handle?.close()
+    handle = nil
+    let rotated = url.appendingPathExtension("1")
+    try? FileManager.default.removeItem(at: rotated)
+    try? FileManager.default.moveItem(at: url, to: rotated)
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    written = 0
+    openIfNeeded()
   }
 
   private func stamp() -> String {

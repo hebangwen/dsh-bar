@@ -132,7 +132,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func openLaunchURL() {
-    guard let string = model.launchURL, let url = URL(string: string) else { return }
+    // An external server has no token to append; opening its root still lands on
+    // the dsh page (or its 401 fence), which is the best this app can offer.
+    let string = model.launchURL ?? "http://\(model.snapshot.address)/"
+    guard let url = URL(string: string) else { return }
     NSWorkspace.shared.open(url)
     panel.hide(returnFocus: false)
   }

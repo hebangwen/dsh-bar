@@ -52,7 +52,13 @@ public enum ExternalInstance {
   /// server that happens to use the port is reported, never signalled.
   public static func canStop(_ info: Info) -> Bool {
     let command = info.command
-    guard command.contains("dsh") || command.contains("bin.js") else { return false }
+    // Match the executable itself, not every path that happens to contain "dsh":
+    // this decision ends in `killpg`.
+    let tokens = command.split(separator: " ").map(String.init)
+    let runsDsh = tokens.contains { token in
+      token.hasSuffix("/dsh") || token.hasSuffix("dsh/lib/bin.js") || token.hasSuffix("/bin.js")
+    }
+    guard runsDsh else { return false }
     if let group = info.group, group <= 1 || group == getpgrp() { return false }
     return true
   }
@@ -79,10 +85,20 @@ public enum ExternalInstance {
   public static func waitForExit(_ info: Info, timeout: TimeInterval) -> Bool {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
-      if kill(info.pid, 0) != 0, errno == ESRCH { return true }
-      usleep(50_000)
+      if !isRunning(info) { return true }
+      usleep(100_000)
     }
-    return kill(info.pid, 0) != 0 && errno == ESRCH
+    return !isRunning(info)
+  }
+
+  /// `kill(pid, 0)` answers "yes" for a zombie too, which would make a stopped
+  /// server look unkillable; `ps` knows the difference.
+  static func isRunning(_ info: Info) -> Bool {
+    if kill(info.pid, 0) != 0, errno == ESRCH { return false }
+    let state = run(ps, ["-o", "stat=", "-p", "\(info.pid)"], timeout: 1)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if state.isEmpty { return false }
+    return !state.hasPrefix("Z")
   }
 
   /// Small synchronous runner: lsof and ps answer in milliseconds, and a hung
@@ -110,7 +126,10 @@ public enum ExternalInstance {
     }
     if done.wait(timeout: .now() + timeout) == .timedOut {
       process.terminate()
-      _ = done.wait(timeout: .now() + 0.2)
+      if done.wait(timeout: .now() + 0.2) == .timedOut {
+        kill(process.processIdentifier, SIGKILL)
+        try? pipe.fileHandleForReading.close()
+      }
       return ""
     }
     process.waitUntilExit()

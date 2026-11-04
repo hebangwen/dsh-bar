@@ -73,13 +73,19 @@ public enum PortProbe {
     }
 
     if connected != 0 {
-      guard errno == EINPROGRESS else { return .free }  // ECONNREFUSED et al.
-      guard wait(descriptor, events: Int16(POLLOUT), timeout: timeout) else { return .free }
+      // Refused means nothing is listening: that is a free port.
+      if errno == ECONNREFUSED { return .free }
+      guard errno == EINPROGRESS else { return .other }
+      // A connect that times out says nothing about the port. Reporting "free"
+      // here would let the app spawn onto a port something else is serving.
+      guard wait(descriptor, events: Int16(POLLOUT), timeout: timeout) else { return .other }
       var error: Int32 = 0
       var errorLength = socklen_t(MemoryLayout<Int32>.size)
-      guard getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &error, &errorLength) == 0,
-            error == 0
-      else { return .free }
+      guard getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &error, &errorLength) == 0 else {
+        return .other
+      }
+      if error == ECONNREFUSED { return .free }
+      guard error == 0 else { return .other }
     }
 
     let request = "GET / HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nConnection: close\r\nUser-Agent: dsh-bar\r\n\r\n"
@@ -125,6 +131,9 @@ public enum PortProbe {
     var entry = pollfd(fd: descriptor, events: events, revents: 0)
     let milliseconds = Int32(max(1, min(timeout, 5) * 1000))
     let ready = poll(&entry, 1, milliseconds)
-    return ready > 0 && (entry.revents & events) != 0
+    // A refused non-blocking connect reports POLLERR, not POLLOUT; watching only
+    // for the requested event would read a refusal as a timeout.
+    let interesting = events | Int16(POLLERR) | Int16(POLLHUP)
+    return ready > 0 && (entry.revents & interesting) != 0
   }
 }

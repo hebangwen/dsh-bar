@@ -37,27 +37,6 @@ public enum StatusIcon {
     }
   }
 
-  /// The starting/stopping arc as a `CGPath`, so the same shape can be drawn by
-  /// a `CAShapeLayer` and rotated by Core Animation.
-  ///
-  /// The menu bar glyph is a *template* image: the system recolours it, but a
-  /// layer's `contents` are raw pixels. Drawing the arc as a shape keeps the
-  /// colour under our control and, more importantly, puts the rotation on a
-  /// layer whose anchor point we own — the status button's own layer is anchored
-  /// at `(0, 0)`, and rotating that swings the glyph out of the menu bar.
-  public static func spinArcPath(side: CGFloat = 18) -> CGPath {
-    let center = CGPoint(x: side / 2, y: side / 2)
-    let path = CGMutablePath()
-    path.addArc(
-      center: center,
-      radius: 5.2,
-      startAngle: 0,
-      endAngle: CGFloat(265.0 * Double.pi / 180),
-      clockwise: false
-    )
-    return path
-  }
-
   /// The listening ring alone, as a template image: the menu bar tints it, so the
   /// static part of the glyph stays free of layer colours.
   public static func listeningRingImage() -> NSImage {
@@ -89,26 +68,6 @@ public enum StatusIcon {
     scale: CGFloat = 2
   ) -> CGImage? {
     tinted(dotImage(radius: radius, side: side), color: color, side: side, scale: scale)
-  }
-
-  /// The listening glyph split into ring and dot, so the dot can breathe while
-  /// the ring stays put. Same radii the static image draws.
-  public static func listeningRingPath(side: CGFloat = 18) -> CGPath {
-    let center = CGPoint(x: side / 2, y: side / 2)
-    let path = CGMutablePath()
-    path.addEllipse(
-      in: CGRect(x: center.x - 5.6, y: center.y - 5.6, width: 11.2, height: 11.2)
-    )
-    return path
-  }
-
-  public static func listeningDotPath(side: CGFloat = 18) -> CGPath {
-    let center = CGPoint(x: side / 2, y: side / 2)
-    let path = CGMutablePath()
-    path.addEllipse(
-      in: CGRect(x: center.x - 2.4, y: center.y - 2.4, width: 4.8, height: 4.8)
-    )
-    return path
   }
 
   /// Frames a transitional glyph passes through. The app spins one static arc

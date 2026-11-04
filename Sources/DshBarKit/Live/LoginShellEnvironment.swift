@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// The environment a terminal would give `dsh`.
@@ -44,8 +45,20 @@ public enum LoginShellEnvironment {
     for key in values.keys where key.hasPrefix("DSHBAR_") {
       values.removeValue(forKey: key)
     }
-    for key in values.keys where key.hasPrefix("DSH_") && key != "DSH_HOME" {
-      values.removeValue(forKey: key)
+    // Only session state is poison here. dsh itself reads configuration such as
+    // DSH_TOOLS_MODE from the environment, so a blanket `DSH_*` sweep would
+    // silently drop the user's own settings.
+    for key in values.keys {
+      let isSessionState = key.hasPrefix("DSH_SESSION")
+        || key.hasPrefix("DSH_TOKEN")
+        || key.hasPrefix("DSH_LAUNCH")
+        || key == "DSH_PROFILE"
+        || key == "DSH_PROFILE_DIR"
+        || key == "DSH_WEB_URL"
+        || key == "DSH_WEB_MODE"
+      if isSessionState {
+        values.removeValue(forKey: key)
+      }
     }
     for key in ["PWD", "OLDPWD", "SHLVL", "_", "TTY", "SHELL_SESSION_ID"] {
       values.removeValue(forKey: key)
@@ -65,7 +78,7 @@ public enum LoginShellEnvironment {
   /// Runs the login shell once (it costs about ten milliseconds) and returns what
   /// it printed, or nil when the shell is missing, hung, or produced no entries.
   public static func capture(
-    timeout: TimeInterval = 3,
+    timeout: TimeInterval = 1.0,
     shell: String = shell,
     script: String = script
   ) -> [String: String]? {
@@ -93,8 +106,12 @@ public enum LoginShellEnvironment {
 
     if done.wait(timeout: .now() + timeout) == .timedOut {
       process.terminate()
-      // Give the reader a moment to drain the pipe so it does not outlive us.
-      _ = done.wait(timeout: .now() + 0.2)
+      if done.wait(timeout: .now() + 0.2) == .timedOut {
+        // A rc file that backgrounds something holding our stdout keeps the pipe
+        // open forever. Kill the shell and close our end so the reader returns.
+        kill(process.processIdentifier, SIGKILL)
+        try? pipe.fileHandleForReading.close()
+      }
       return nil
     }
 
@@ -109,7 +126,7 @@ public enum LoginShellEnvironment {
   public static func resolve(
     home: String = FileManager.default.homeDirectoryForCurrentUser.path,
     fallback: [String: String] = ProcessInfo.processInfo.environment,
-    timeout: TimeInterval = 3
+    timeout: TimeInterval = 1.0
   ) -> (values: [String: String], source: Source) {
     if let captured = capture(timeout: timeout) {
       return (sanitize(captured, home: home, fallback: fallback), .loginShell)

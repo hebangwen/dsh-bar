@@ -38,6 +38,8 @@ public enum HarnessEvent: Sendable, Equatable {
   case detected(path: String)
   case detectionFailed(searched: [String])
   case start(port: Int, profile: String)
+  /// Settings changed while nothing is running: follow the new port/profile.
+  case preferencesChanged(port: Int, profile: String)
   /// A dsh someone else started is on the port we are supposed to use.
   case observedExternal(port: Int)
   /// That server is gone again.
@@ -46,6 +48,8 @@ public enum HarnessEvent: Sendable, Equatable {
   case spawnFailed(HarnessFailure)
   case launch(LaunchLine)
   case exited(code: Int32?, signal: Int32?)
+  /// A stop that did not take: the external server is still holding the port.
+  case stopFailed(port: Int, detail: String)
   case stopRequested
   case killTimedOut
   case cancel
@@ -158,6 +162,13 @@ public enum HarnessReducer {
         commands = [.disarmReadyTimeout]
       }
 
+    case .preferencesChanged(let port, let profile):
+      guard [.stopped, .failed, .unavailable].contains(next.snapshot.phase) else {
+        return (state, [])
+      }
+      next.snapshot.port = port
+      next.snapshot.profile = profile
+
     case .observedExternal(let port):
       // Only a fresh stop can become an external server; anything else already
       // knows what it is looking at.
@@ -205,6 +216,7 @@ public enum HarnessReducer {
       case .ready(let report):
         guard next.snapshot.phase == .starting, !next.announced else { return (state, []) }
         next.announced = true
+        next.pendingDetail = nil
         next.snapshot.phase = .listening
         next.snapshot.owner = .dshBar
         next.snapshot.host = report.host
@@ -227,6 +239,9 @@ public enum HarnessReducer {
         commands = [.disarmReadyTimeout, .terminate]
 
       case .startupFailed(let detail):
+        // Only a start in flight owns this detail; a late line from an earlier
+        // run must not colour the next failure.
+        guard next.snapshot.phase == .starting else { return (state, []) }
         next.pendingDetail = detail
         commands = []
 
@@ -281,6 +296,17 @@ public enum HarnessReducer {
       } else {
         commands.append(.terminate)
       }
+
+    case .stopFailed(let port, let detail):
+      guard next.snapshot.phase == .stopping else { return (state, []) }
+      next.snapshot.phase = .failed
+      next.snapshot.busy = false
+      next.snapshot.hasLaunchURL = false
+      next.snapshot.uptime = nil
+      next.snapshot.failure = HarnessFailure(kind: .portInUse(port: port), detail: detail)
+      next.launchURL = nil
+      next.intentionalStop = false
+      commands = [.stopUptime, .disarmReadyTimeout]
 
     case .killTimedOut:
       guard next.snapshot.phase == .stopping else { return (state, []) }

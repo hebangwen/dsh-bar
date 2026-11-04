@@ -18,6 +18,12 @@ struct SettingsView: View {
   private var copy: Copy { model.copy }
   private var labelFont: Font { .system(size: 12) }
 
+  /// Read from the bundle so bumping the version is one edit in Info.plist, not a
+  /// second one hidden in a view.
+  static var appVersion: String {
+    (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "—"
+  }
+
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       sectionTitle(copy.processSection)
@@ -140,7 +146,7 @@ struct SettingsView: View {
           .foregroundStyle(.tertiary)
       }
       Spacer(minLength: 8)
-      Text("dsh bar 0.2.0")
+      Text("dsh bar \(Self.appVersion)")
         .font(.system(size: 10.5, design: .monospaced))
         .foregroundStyle(.tertiary)
     }

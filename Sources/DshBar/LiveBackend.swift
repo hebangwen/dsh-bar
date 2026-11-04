@@ -24,6 +24,7 @@ final class LiveBackend: HarnessBackend {
   private var environment: [String: String]?
   private var environmentDate: Date?
 
+  private var watchTimer: Timer?
   private var readyTimer: Timer?
   private var stopTimer: Timer?
   private var killTimer: Timer?
@@ -40,6 +41,7 @@ final class LiveBackend: HarnessBackend {
     snapshot.profile = preferences.profile
     snapshot.lastRun = nil
     state = HarnessState(snapshot: snapshot)
+    startWatching()
   }
 
   // MARK: - HarnessBackend
@@ -86,6 +88,49 @@ final class LiveBackend: HarnessBackend {
     return lookup
   }
 
+  /// Probe the configured port for a server this app does not own. Runs when the
+  /// panel opens, after the port changes, and on a slow timer, so a `dsh web`
+  /// started in a terminal appears in the panel by itself.
+  func refreshExternal() {
+    let phase = state.snapshot.phase
+    guard phase == .stopped || (phase == .listening && state.snapshot.owner == .external) else {
+      return
+    }
+    let port = state.snapshot.port
+    guard (1...65535).contains(port) else { return }
+    probeQueue.async { [weak self] in
+      let portState = PortProbe.probe(port: port)
+      DispatchQueue.main.async {
+        MainActor.assumeIsolated {
+          self?.observe(portState, port: port)
+        }
+      }
+    }
+  }
+
+  private func observe(_ portState: PortState, port: Int) {
+    guard port == state.snapshot.port else { return }
+    switch (state.snapshot.phase, portState) {
+    case (.stopped, .dsh):
+      dispatch(.observedExternal(port: port))
+    case (.listening, .free) where state.snapshot.owner == .external:
+      dispatch(.observedFree(port: port))
+    default:
+      break
+    }
+  }
+
+  private func startWatching() {
+    watchTimer?.invalidate()
+    let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+      MainActor.assumeIsolated {
+        self?.refreshExternal()
+      }
+    }
+    RunLoop.main.add(timer, forMode: .common)
+    watchTimer = timer
+  }
+
   func preview(_ scene: DemoScene) {
     // The live controller has no preview scenes; only the demo backend does.
   }
@@ -93,6 +138,7 @@ final class LiveBackend: HarnessBackend {
   /// Called when the app is quitting. SIGTERM first, then a short wait, because a
   /// killed dsh leaves a session store that the next boot has to repair.
   func shutdown() {
+    watchTimer?.invalidate()
     readyTimer?.invalidate()
     stopTimer?.invalidate()
     killTimer?.invalidate()

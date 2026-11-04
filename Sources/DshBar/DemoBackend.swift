@@ -97,6 +97,8 @@ final class DemoBackend: HarnessBackend {
     publish(next)
   }
 
+  func refreshExternal() {}
+
   func redetect() -> DshLookup {
     .found(DshDetection(path: "/usr/local/bin/dsh", source: .localBin))
   }

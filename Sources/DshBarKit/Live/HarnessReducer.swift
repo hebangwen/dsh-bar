@@ -38,6 +38,10 @@ public enum HarnessEvent: Sendable, Equatable {
   case detected(path: String)
   case detectionFailed(searched: [String])
   case start(port: Int, profile: String)
+  /// A dsh someone else started is on the port we are supposed to use.
+  case observedExternal(port: Int)
+  /// That server is gone again.
+  case observedFree(port: Int)
   case portChecked(PortState, port: Int)
   case spawnFailed(HarnessFailure)
   case launch(LaunchLine)
@@ -153,6 +157,39 @@ public enum HarnessReducer {
         next.snapshot.hasLaunchURL = false
         commands = [.disarmReadyTimeout]
       }
+
+    case .observedExternal(let port):
+      // Only a fresh stop can become an external server; anything else already
+      // knows what it is looking at.
+      guard next.snapshot.phase == .stopped else { return (state, []) }
+      next.snapshot.phase = .listening
+      next.snapshot.owner = .external
+      next.snapshot.hasLaunchURL = false
+      next.snapshot.uptime = nil
+      next.snapshot.busy = false
+      next.snapshot.failure = nil
+      next.snapshot.port = port
+      next.snapshot.log = []
+      next.launchURL = nil
+      next.startedAt = nil
+      next.announced = false
+      commands = [.stopUptime]
+
+    case .observedFree(let port):
+      // An external server that disappears is not a failure: the user closed it
+      // in their terminal, which is exactly what "managed nowhere" looks like.
+      guard next.snapshot.phase == .listening,
+            next.snapshot.owner == .external,
+            port == next.snapshot.port
+      else { return (state, []) }
+      next.snapshot.phase = .stopped
+      next.snapshot.busy = false
+      next.snapshot.uptime = nil
+      next.snapshot.hasLaunchURL = false
+      next.snapshot.failure = nil
+      next.snapshot.lastRun = justNow(language)
+      next.launchURL = nil
+      commands = [.stopUptime]
 
     case .spawnFailed(let failure):
       next.snapshot.phase = .failed

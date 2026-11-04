@@ -257,6 +257,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     if NSApp.currentEvent?.type == .rightMouseUp {
       presentMenu()
     } else {
+      // Refresh before showing: the panel should never describe a port that
+      // changed since it was last looked at.
+      model.refreshExternal()
       panel.toggle(relativeTo: statusItem.button)
     }
   }

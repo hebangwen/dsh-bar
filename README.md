@@ -51,6 +51,7 @@ macOS 菜单栏里的 dsh 管理器：把 `dsh --profile web` 挂在它下面，
 - **找到 dsh**。GUI 应用的 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，里面没有 `node`；而 `dsh` 是 `#!/usr/bin/env node` 脚本，从这种环境里跑会直接失败（`env: node: No such file or directory`）。所以每次启动前抓一次登录 shell 的 `env -0`（约 10ms，实测 50 个变量），用它的 PATH 依次在 `PATH`、`~/.nvm/versions/node/*/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 里找。设置里指定的路径最优先，`DSHBAR_DSH_PATH` 次之。
 - **先探端口，再启动**。裸 socket `connect()` 之后发一次无 token 的 `GET /`：`401` + `dsh web authentication required` 就是外部 dsh，面板直接显示"正在监听 / 由终端启动"；端口有响应但指纹不对，就是 `端口 N 已被占用。`，不浪费两秒去 spawn 一个注定失败的进程。
 - **只认那一行**。就绪信号是 `dsh web: <url>` 且带单个 `token` 参数；stderr 里的插件崩溃、`DSH_MOBILE_NETWORK_*` 警告只进日志，不参与判定。
+- **一直在看**。端口不是只在按「启动」时才探测：app 启动后、每次打开面板、改端口之后，以及未运行 / 外部实例状态下每 5 秒，都会探一次。所以终端里起的 dsh 会自己出现在面板上（显示「由终端启动」），终端里 Ctrl-C 掉，面板几秒内也会回到「未运行」。已经由 app 管理的实例不轮询——它的退出有进程回调。
 - **接管**。端口上的 dsh 如果是终端启动的，面板给一个明确的「接管」：第一次点击变成「确认接管？」，第二次才动手。接管必须先 `killpg` 掉那个进程，再以受管理的方式在**同一个端口**重新启动，所以浏览器里正在进行的会话会中断——面板用琥珀色把这句话写在按钮下面。停止是另一件事，留在第三行，同样二次确认，两个动作不混。
 - **按进程组停止**。`posix_spawn` + `POSIX_SPAWN_SETSID` 让 dsh 自成一组，停止时 `killpg(SIGTERM)` → 5 秒宽限 → `killpg(SIGKILL)`。插件 spawn 的 MCP 子进程会一起收掉，退出 app 时也不会留孤儿。
 - **停两种，说明两种**。用户点的停止 → `未运行` + "上次运行 刚刚"；进程自己崩的 → `启动失败` + 退出码。外部实例停止要二次确认，且先 `lsof` 取 pid、确认命令行里确实是 dsh 才发信号。

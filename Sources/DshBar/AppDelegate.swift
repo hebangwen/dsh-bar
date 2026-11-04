@@ -27,6 +27,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     status.install()
 
+    // The port may already serve a dsh someone started in a terminal; look once at
+    // launch so the panel opens telling the truth.
+    model.refreshExternal()
+
     // `DSHBAR_OPEN_PANEL=1` opens the panel on launch: used to verify layout
     // and positioning without clicking the menu bar.
     if model.demoMode,

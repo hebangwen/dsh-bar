@@ -526,6 +526,53 @@ func runChecks() -> Int32 {
   let (foundState, _) = HarnessReducer.reduce(missingState, .detected(path: "/x/dsh"), language: .en)
   checks.equal(foundState.snapshot.phase, .stopped, "a later detection recovers")
 
+  // MARK: Reducer — external observation
+
+  // A server started in a terminal must appear without the user pressing Start.
+  let idle = HarnessState()
+  let (seenExternal, seenCommands) = HarnessReducer.reduce(
+    idle,
+    .observedExternal(port: 3080),
+    language: .en
+  )
+  checks.equal(seenExternal.snapshot.phase, .listening, "an observed dsh listens")
+  checks.equal(seenExternal.snapshot.owner, .external, "an observed dsh is external")
+  checks.check(!seenExternal.snapshot.hasLaunchURL, "an observed dsh has no token")
+  checks.equal(seenCommands, [.stopUptime], "observing stops the idle clock")
+
+  let (seenAgain, seenAgainCommands) = HarnessReducer.reduce(
+    seenExternal,
+    .observedExternal(port: 3080),
+    language: .en
+  )
+  checks.equal(seenAgain, seenExternal, "observing twice changes nothing")
+  checks.equal(seenAgainCommands, [], "observing twice runs nothing")
+
+  let (goneState, goneCommands) = HarnessReducer.reduce(
+    seenExternal,
+    .observedFree(port: 3080),
+    language: .en
+  )
+  checks.equal(goneState.snapshot.phase, .stopped, "a vanished external dsh is stopped")
+  checks.check(!goneState.snapshot.hasLaunchURL, "a vanished external dsh leaves no URL")
+  checks.equal(goneCommands, [.stopUptime], "a vanished external dsh stops the clock")
+
+  let (wrongPort, wrongCommands) = HarnessReducer.reduce(
+    seenExternal,
+    .observedFree(port: 3099),
+    language: .en
+  )
+  checks.equal(wrongPort, seenExternal, "a report for another port is ignored")
+  checks.equal(wrongCommands, [], "a report for another port runs nothing")
+
+  let owned = HarnessReducer.reduce(
+    HarnessState(),
+    .start(port: 3099, profile: "web"),
+    language: .en
+  ).0
+  let (ownedExternal, _) = HarnessReducer.reduce(owned, .observedExternal(port: 3099), language: .en)
+  checks.equal(ownedExternal.snapshot.phase, .starting, "observing does not hijack a start in progress")
+
   // MARK: Child process guard
 
   do {

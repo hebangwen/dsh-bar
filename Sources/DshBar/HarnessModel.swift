@@ -14,6 +14,8 @@ protocol HarnessBackend: AnyObject {
   func stop()
   func cancel()
   func redetect() -> DshLookup
+  /// Look at the port and report whether a dsh someone else started is there.
+  func refreshExternal()
   func preview(_ scene: DemoScene)
   func shutdown()
 }
@@ -209,6 +211,14 @@ final class HarnessModel: ObservableObject {
     var next = preferences
     next.port = BarPreferences.normalizePort(port)
     apply(next)
+    // A new port is a new question: is someone else already serving it?
+    refreshExternal()
+  }
+
+  /// Called before the panel is shown and on a slow timer, so a server started in
+  /// a terminal shows up without the user having to press Start.
+  func refreshExternal() {
+    backend.refreshExternal()
   }
 
   func update(profile: String) {

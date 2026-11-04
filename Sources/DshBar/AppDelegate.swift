@@ -114,6 +114,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       model.restart()
     case .copyLink:
       model.copyLink()
+    case .takeOver:
+      model.takeOver()
     case .openLog:
       openLog()
     case .settings:

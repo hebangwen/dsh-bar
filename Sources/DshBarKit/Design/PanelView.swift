@@ -5,6 +5,7 @@ public enum PanelAction: Sendable, Equatable {
   case secondary
   case restart
   case copyLink
+  case takeOver
   case openLog
   case settings
   case quit
@@ -158,11 +159,21 @@ public struct PanelView: View {
           .buttonStyle(PrimaryActionStyle(palette: palette, isEnabled: snapshot.hasLaunchURL || snapshot.owner == .external))
           .disabled(!snapshot.hasLaunchURL && snapshot.owner == .dshBar)
 
-          Button { actions(.secondary) } label: {
-            Text(copy.secondaryLabel(snapshot) ?? "")
+          if snapshot.owner == .external {
+            // Stop lives in the tertiary row; the primary secondary action is the
+            // one that gives the app control, and it says so before it acts.
+            Button { actions(.takeOver) } label: {
+              Text(copy.takeOverLabel)
+            }
+            .buttonStyle(OutlineActionStyle(palette: palette))
+            .frame(width: 110)
+          } else {
+            Button { actions(.secondary) } label: {
+              Text(copy.secondaryLabel(snapshot) ?? "")
+            }
+            .buttonStyle(OutlineActionStyle(palette: palette))
+            .frame(width: 84)
           }
-          .buttonStyle(OutlineActionStyle(palette: palette))
-          .frame(width: 84)
         }
         .padding(.bottom, 5)
         tertiaryRow
@@ -210,12 +221,19 @@ public struct PanelView: View {
 
   private var tertiaryRow: some View {
     HStack(spacing: 16) {
-      Button { actions(.restart) } label: { Text(copy.restart) }
+      if snapshot.owner == .external {
+        Button { actions(.secondary) } label: {
+          Text(copy.secondaryLabel(snapshot) ?? copy.takeOver)
+        }
         .buttonStyle(TextActionStyle(palette: palette))
-      Button { actions(.copyLink) } label: { Text(copy.copyLink) }
-        .buttonStyle(TextActionStyle(palette: palette))
-        .disabled(!snapshot.hasLaunchURL)
-        .opacity(snapshot.hasLaunchURL ? 1 : 0.4)
+      } else {
+        Button { actions(.restart) } label: { Text(copy.restart) }
+          .buttonStyle(TextActionStyle(palette: palette))
+        Button { actions(.copyLink) } label: { Text(copy.copyLink) }
+          .buttonStyle(TextActionStyle(palette: palette))
+          .disabled(!snapshot.hasLaunchURL)
+          .opacity(snapshot.hasLaunchURL ? 1 : 0.4)
+      }
       Spacer(minLength: 0)
     }
   }
@@ -243,14 +261,21 @@ public struct PanelView: View {
   }
 
   private var externalNote: some View {
-    Text(copy.externalNote)
-      .font(Typography.body)
-      .foregroundStyle(palette.inkSecondary)
-      .lineSpacing(3)
-      .fixedSize(horizontal: false, vertical: true)
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(.horizontal, Metrics.pad)
-      .padding(.top, Metrics.detailTop)
+    VStack(alignment: .leading, spacing: 6) {
+      Text(copy.externalNote)
+        .font(Typography.body)
+        .foregroundStyle(palette.inkSecondary)
+        .lineSpacing(3)
+        .fixedSize(horizontal: false, vertical: true)
+      Text(copy.takeOverNote)
+        .font(Typography.body)
+        .foregroundStyle(palette.warn)
+        .lineSpacing(3)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.horizontal, Metrics.pad)
+    .padding(.top, Metrics.detailTop)
   }
 
   private var unavailableNote: some View {

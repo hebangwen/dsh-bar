@@ -143,6 +143,32 @@ public struct Copy: Sendable {
 
   public var restart: String { zh("重新启动", "Restart") }
 
+  // MARK: - Take over
+
+  /// Converting a server someone started in a terminal into one this app owns.
+  /// It has to stop the process first, so it is offered as an explicit action
+  /// with its own confirmation, never as the default.
+  public var takeOver: String { zh("接管", "Take over") }
+
+  public var takeOverLabel: String {
+    takeOverIsConfirming ? zh("确认接管？", "Take over?") : takeOver
+  }
+
+  private var takeOverIsConfirming = false
+
+  public func withTakeOverConfirmation(_ confirming: Bool) -> Copy {
+    var copy = self
+    copy.takeOverIsConfirming = confirming
+    return copy
+  }
+
+  public var takeOverNote: String {
+    zh(
+      "接管会先停掉这个进程，再由 dsh bar 重新启动；浏览器里正在进行的会话会中断。",
+      "Taking over stops this server and restarts it under dsh bar. Sessions in progress in the browser will be interrupted."
+    )
+  }
+
   public var copyLink: String {
     copied ? zh("已复制", "Copied") : zh("复制链接", "Copy link")
   }

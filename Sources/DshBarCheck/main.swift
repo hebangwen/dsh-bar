@@ -547,6 +547,24 @@ func runChecks() -> Int32 {
     "our own process group may not"
   )
 
+  // MARK: Copy — take over
+
+  checks.equal(en.takeOver, "Take over", "en take over")
+  checks.equal(zh.takeOver, "接管", "zh take over")
+  checks.equal(en.takeOverLabel, "Take over", "take over label before confirming")
+  checks.equal(
+    en.withTakeOverConfirmation(true).takeOverLabel,
+    "Take over?",
+    "take over label while confirming"
+  )
+  checks.check(zh.takeOverNote.contains("中断"), "zh take-over note warns about interruption")
+  checks.check(en.takeOverNote.contains("interrupted"), "en take-over note warns about interruption")
+  checks.equal(
+    en.secondaryLabel(HarnessSnapshot(phase: .listening, owner: .external)),
+    "Stop",
+    "the external stop stays a separate, textual action"
+  )
+
   // MARK: Copy — settings
 
   checks.equal(en.processSection, "Process", "en process section")

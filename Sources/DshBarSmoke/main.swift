@@ -45,6 +45,10 @@ enum Smoke {
     }
     print("✓ dsh: \(detection.path) (\(detection.source.rawValue))")
 
+    if arguments.contains("--external") {
+      exit(takeOver(environment: environment.values, detection: detection, port: requested))
+    }
+
     let before = PortProbe.probe(port: requested)
     guard before == .free else {
       print("✗ port \(requested) is not free (\(before)); stop it or pick another port")
@@ -140,6 +144,87 @@ enum Smoke {
     }
     print("\n✗ \(failures.count) smoke checks failed")
     exit(1)
+  }
+
+  /// The take-over half of the external-instance flow: start a server the way a
+  /// terminal would, then stop it through `ExternalInstance` — lsof for the pid,
+  /// `ps` to confirm the command line, SIGTERM to the group — which is exactly
+  /// what the panel does before it restarts the server under its own control.
+  private static func takeOver(
+    environment: [String: String],
+    detection: DshDetection,
+    port: Int
+  ) -> Int32 {
+    var failures: [String] = []
+    func check(_ condition: Bool, _ message: String) {
+      print(condition ? "✓ \(message)" : "✗ \(message)")
+      if !condition { failures.append(message) }
+    }
+
+    guard PortProbe.probe(port: port) == .free else {
+      print("✗ port \(port) is not free")
+      return 1
+    }
+
+    var ready: LaunchReport?
+    var exitCode: Int32?
+    let child: ChildProcess
+    do {
+      child = try ChildProcess(
+        executable: detection.path,
+        arguments: ["--profile", "web", "--no-open", "--port", "\(port)"],
+        environment: environment
+      )
+    } catch {
+      print("✗ spawn failed: \(error)")
+      return 1
+    }
+    child.onLine = { _, text in
+      if case let .ready(report) = LaunchOutput.classify(text) { ready = report }
+    }
+    child.onExit = { code, _ in
+      exitCode = code ?? -1
+    }
+
+    let deadline = Date().addingTimeInterval(30)
+    while ready == nil, exitCode == nil, Date() < deadline {
+      RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    check(ready != nil, "the unsolicited instance is listening")
+    check(child.pid > 0, "it has a pid")
+
+    guard let pid = ExternalInstance.listeningPID(port: port) else {
+      check(false, "lsof names the listener on \(port)")
+      child.kill()
+      return 1
+    }
+    check(pid == child.pid, "lsof names the instance we started (pid \(pid))")
+
+    guard let info = ExternalInstance.describe(pid: pid) else {
+      check(false, "ps describes pid \(pid)")
+      child.kill()
+      return 1
+    }
+    check(ExternalInstance.canStop(info), "its command line qualifies for take-over")
+    check(ExternalInstance.stop(info), "SIGTERM to the group stops it")
+
+    var freed = false
+    let freeDeadline = Date().addingTimeInterval(3)
+    while Date() < freeDeadline {
+      if PortProbe.probe(port: port) == .free { freed = true; break }
+      RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+    }
+    check(freed, "port \(port) is free, so the app may start its own")
+    if exitCode == nil {
+      child.kill()
+    }
+
+    if failures.isEmpty {
+      print("\n✓ take-over smoke passed")
+      return 0
+    }
+    print("\n✗ \(failures.count) take-over checks failed")
+    return 1
   }
 
   // MARK: - Helpers

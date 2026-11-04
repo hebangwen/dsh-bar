@@ -38,7 +38,7 @@ macOS 菜单栏里的 dsh 管理器：把 `dsh --profile web` 挂在它下面，
 | 未运行 | `未运行` | 空心环 | 启动 |
 | 启动中 | `正在启动…` | 琥珀环 + 呼吸 | 取消 |
 | 正在监听 | `正在监听` | 实心点（呼吸）+ 灯座环 | 打开网页界面 / 停止 / 重新启动 / 复制链接 |
-| 外部启动 | `正在监听` | 空心内环 | 在浏览器中打开 / 停止（二次点击确认） |
+| 外部启动 | `正在监听` | 空心内环 | 在浏览器中打开 / 接管（二次确认）/ 停止（二次点击确认） |
 | 停止中 | `正在停止…` | 灰环 + 方块 | — |
 | 启动失败 | `启动失败` | 砖红点 | 重试 / 换一个空闲端口 + 人话诊断 + 输出 |
 
@@ -51,6 +51,7 @@ macOS 菜单栏里的 dsh 管理器：把 `dsh --profile web` 挂在它下面，
 - **找到 dsh**。GUI 应用的 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，里面没有 `node`；而 `dsh` 是 `#!/usr/bin/env node` 脚本，从这种环境里跑会直接失败（`env: node: No such file or directory`）。所以每次启动前抓一次登录 shell 的 `env -0`（约 10ms，实测 50 个变量），用它的 PATH 依次在 `PATH`、`~/.nvm/versions/node/*/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 里找。设置里指定的路径最优先，`DSHBAR_DSH_PATH` 次之。
 - **先探端口，再启动**。裸 socket `connect()` 之后发一次无 token 的 `GET /`：`401` + `dsh web authentication required` 就是外部 dsh，面板直接显示"正在监听 / 由终端启动"；端口有响应但指纹不对，就是 `端口 N 已被占用。`，不浪费两秒去 spawn 一个注定失败的进程。
 - **只认那一行**。就绪信号是 `dsh web: <url>` 且带单个 `token` 参数；stderr 里的插件崩溃、`DSH_MOBILE_NETWORK_*` 警告只进日志，不参与判定。
+- **接管**。端口上的 dsh 如果是终端启动的，面板给一个明确的「接管」：第一次点击变成「确认接管？」，第二次才动手。接管必须先 `killpg` 掉那个进程，再以受管理的方式在**同一个端口**重新启动，所以浏览器里正在进行的会话会中断——面板用琥珀色把这句话写在按钮下面。停止是另一件事，留在第三行，同样二次确认，两个动作不混。
 - **按进程组停止**。`posix_spawn` + `POSIX_SPAWN_SETSID` 让 dsh 自成一组，停止时 `killpg(SIGTERM)` → 5 秒宽限 → `killpg(SIGKILL)`。插件 spawn 的 MCP 子进程会一起收掉，退出 app 时也不会留孤儿。
 - **停两种，说明两种**。用户点的停止 → `未运行` + "上次运行 刚刚"；进程自己崩的 → `启动失败` + 退出码。外部实例停止要二次确认，且先 `lsof` 取 pid、确认命令行里确实是 dsh 才发信号。
 - **端口 0**。失败时按"换一个空闲端口"把端口设成 0，`dsh --port 0` 由系统分配，真实端口从 URL 回读并写回设置。
@@ -113,8 +114,9 @@ open "build/dsh bar.app"        # 菜单栏出现图标，点开就是面板
 开发与验证：
 
 ```sh
-swift run dshbar-check                            # 213 项校验：文案、状态谓词、解析、状态机、fixture、图标帧
+swift run dshbar-check                            # 230 项校验：文案、状态谓词、解析、状态机、fixture、图标帧
 swift run dshbar-smoke --port 3099                # 真机端到端：定位 → 启动 → 校验 URL/401 → 停止 → 端口释放
+swift run dshbar-smoke --external --port 3099     # 接管前半段：lsof 找 pid → ps 校验命令行 → SIGTERM → 端口释放
 swift run dshbar-snap docs/design                 # 离屏渲染所有状态 → PNG（浅/深 × 中/英）
 DSHBAR_OPEN_PANEL=1 "build/dsh bar.app/Contents/MacOS/DshBar"   # 启动即弹面板
 DSHBAR_AUTOSTART=1 ...                                           # 启动后立即 start（联调用，省一次点击）
@@ -155,7 +157,7 @@ Sources/DshBar/               菜单栏 app：NSStatusItem + NSPanel + SwiftUI
   DemoBackend.swift           演示驱动（fixture 状态，供设计评审）
 Sources/DshBarSnapshot/       离屏出图工具（ImageRenderer → PNG）
 Sources/DshBarSmoke/          真机端到端验证（启动 → 校验 → 停止）
-Sources/DshBarCheck/          213 项断言的可执行检查（不依赖 XCTest / Xcode）
+Sources/DshBarCheck/          230 项断言的可执行检查（不依赖 XCTest / Xcode）
 scripts/                      build-app.sh / make-icon.swift
 docs/design/                  外观图（评审用）
 ```

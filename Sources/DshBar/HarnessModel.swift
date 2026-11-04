@@ -55,6 +55,7 @@ enum DshBarPaths {
 final class HarnessModel: ObservableObject {
   @Published private(set) var snapshot: HarnessSnapshot
   @Published private(set) var stopIsConfirming = false
+  @Published private(set) var takeOverIsConfirming = false
   @Published private(set) var copied = false
   @Published private(set) var preferences: BarPreferences
   @Published private(set) var detectedPath: String?
@@ -69,8 +70,12 @@ final class HarnessModel: ObservableObject {
 
   private let backend: HarnessBackend
   private var confirmReset: DispatchWorkItem?
+  private var takeOverReset: DispatchWorkItem?
   private var copyReset: DispatchWorkItem?
   private var restartWhenStopped = false
+  /// Set by "Take over": the restarted server must stay on the port the terminal
+  /// instance was already using, otherwise the hand-off would move the UI.
+  private var restartPort: Int?
 
   init(demoMode: Bool = ProcessInfo.processInfo.environment["DSHBAR_DEMO"] == "1") {
     let language = UILanguage.matching()
@@ -101,6 +106,7 @@ final class HarnessModel: ObservableObject {
   var copy: Copy {
     Copy(language: language)
       .withStopConfirmation(stopIsConfirming)
+      .withTakeOverConfirmation(takeOverIsConfirming)
       .withCopyConfirmation(copied)
   }
 
@@ -136,6 +142,7 @@ final class HarnessModel: ObservableObject {
 
   func stop() {
     guard snapshot.phase == .listening else { return }
+    clearTakeOverConfirmation()
     if snapshot.owner == .external, !stopIsConfirming {
       stopIsConfirming = true
       let reset = DispatchWorkItem { [weak self] in self?.stopIsConfirming = false }
@@ -148,8 +155,29 @@ final class HarnessModel: ObservableObject {
     backend.stop()
   }
 
+  /// Turns a server someone started in a terminal into one this app owns. It is
+  /// destructive — the process has to stop before the app can start its own — so
+  /// it takes a second click, and the panel spells out what will be interrupted.
+  func takeOver() {
+    guard snapshot.phase == .listening, snapshot.owner == .external else { return }
+    guard takeOverIsConfirming else {
+      takeOverIsConfirming = true
+      clearStopConfirmation()
+      let reset = DispatchWorkItem { [weak self] in self?.takeOverIsConfirming = false }
+      takeOverReset?.cancel()
+      takeOverReset = reset
+      DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: reset)
+      return
+    }
+    takeOverIsConfirming = false
+    restartPort = snapshot.port
+    restartWhenStopped = true
+    backend.stop()
+  }
+
   func restart() {
     guard snapshot.phase == .listening else { return }
+    clearTakeOverConfirmation()
     backend.stop()
     // The backend reports `.stopped` once the process is gone; restart from that
     // event rather than guessing a delay.
@@ -269,6 +297,11 @@ final class HarnessModel: ObservableObject {
     stopIsConfirming = false
   }
 
+  private func clearTakeOverConfirmation() {
+    takeOverReset?.cancel()
+    takeOverIsConfirming = false
+  }
+
   /// Called on every snapshot. A restart is two steps — stop, then start from the
   /// settled state — rather than a guessed delay, because the process is the only
   /// thing that knows when the port is free again.
@@ -277,7 +310,16 @@ final class HarnessModel: ObservableObject {
     switch snapshot.phase {
     case .stopped:
       restartWhenStopped = false
-      backend.start(port: preferences.port, profile: preferences.profile)
+      let port = restartPort ?? preferences.port
+      restartPort = nil
+      if port != preferences.port {
+        apply(BarPreferences(
+          binaryPath: preferences.binaryPath,
+          port: port,
+          profile: preferences.profile
+        ))
+      }
+      backend.start(port: port, profile: preferences.profile)
     case .failed:
       restartWhenStopped = false
     default:

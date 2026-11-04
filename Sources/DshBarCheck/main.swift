@@ -585,6 +585,21 @@ func runChecks() -> Int32 {
   checks.check(abs(listenDot.boundingBox.width - 4.8) < 0.2, "the listening dot is 4.8 wide")
   checks.check(abs(listenDot.boundingBox.midX - 9) < 0.1, "the dot is centred")
 
+  // Layers animate baked bitmaps, not paths: a missing bitmap would leave the
+  // menu bar blank while a state is changing.
+  checks.check(
+    StatusIcon.bitmap(for: .starting, owner: .dshBar, color: .black) != nil,
+    "the spin arc bakes into a bitmap"
+  )
+  checks.check(
+    StatusIcon.dotBitmap(color: .white) != nil,
+    "the listening dot bakes into a bitmap"
+  )
+  checks.check(
+    StatusIcon.listeningRingImage().isTemplate,
+    "the listening ring is a template image"
+  )
+
   // MARK: Menu bar glyphs
 
   checks.check(StatusIcon.frames(for: .starting, owner: .dshBar) != nil, "starting animates")

@@ -150,28 +150,32 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     animationTimer = timer
   }
 
-  /// The transitional glyph is a `CAShapeLayer` of our own, not the button's
-  /// layer: AppKit anchors a view's own layer at `(0, 0)`, so rotating it turns
-  /// the icon around the button's corner and throws it out of the menu bar. A
-  /// sublayer we create is anchored at its centre, which is what "spin in place"
-  /// needs.
+  /// The transitional glyph is a bitmap layer of our own, not the button's layer:
+  /// AppKit anchors that one at `(0, 0)`, so rotating it turns the icon around
+  /// the button's corner and throws it out of the menu bar.
+  ///
+  /// It is a bitmap rather than a `CAShapeLayer` because a shape is re-rasterised
+  /// on every composite — sixty vector redraws a second of the menu bar, which
+  /// showed up as ~50% window-server CPU. A texture is merely scaled and rotated
+  /// by the compositor. The frame-rate cap keeps the rest honest.
   private func startSpin(on button: NSStatusBarButton, clockwise: Bool, secondsPerTurn: Double) {
     stopArt()
     button.wantsLayer = true
     guard let host = button.layer else { return }
 
     let side: CGFloat = 18
-    let shape = CAShapeLayer()
-    shape.bounds = CGRect(x: 0, y: 0, width: side, height: side)
-    shape.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-    shape.position = glyphCenter(in: host, side: side)
-    shape.path = StatusIcon.spinArcPath(side: side)
-    shape.fillColor = nil
-    shape.strokeColor = glyphColor(for: button).cgColor
-    shape.lineWidth = 1.6
-    shape.lineCap = .round
-    host.addSublayer(shape)
-    artLayers = [shape]
+    let layer = CALayer()
+    layer.bounds = CGRect(x: 0, y: 0, width: side, height: side)
+    layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+    layer.position = glyphCenter(in: host, side: side)
+    layer.contents = StatusIcon.bitmap(
+      for: .starting,
+      owner: .dshBar,
+      color: glyphColor(for: button)
+    )
+    layer.contentsScale = 2
+    host.addSublayer(layer)
+    artLayers = [layer]
 
     // The template image would draw a second, static glyph underneath.
     button.image = nil
@@ -182,50 +186,42 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     spin.duration = secondsPerTurn
     spin.repeatCount = .infinity
     spin.isRemovedOnCompletion = false
-    shape.add(spin, forKey: "dsh.spin")
+    spin.preferredFrameRateRange = CAFrameRateRange(minimum: 12, maximum: 20, preferred: 15)
+    layer.add(spin, forKey: "dsh.spin")
   }
 
   /// While the server is up, the dot breathes: it is the one piece of motion the
-  /// app keeps running, so "alive" stays readable at a glance. Ring and dot are
-  /// separate layers, so only the dot changes size.
+  /// app keeps running, so "alive" stays readable at a glance.
+  ///
+  /// The ring stays a template image (the menu bar tints it, no layer needed) and
+  /// only the dot is a layer, so exactly one small texture is composited per
+  /// frame — and only at the capped frame rate.
   private func startListeningBreathe(on button: NSStatusBarButton) {
     stopArt()
     button.wantsLayer = true
     guard let host = button.layer else { return }
 
     let side: CGFloat = 18
-    let center = glyphCenter(in: host, side: side)
-    let color = glyphColor(for: button).cgColor
+    button.image = StatusIcon.listeningRingImage()
 
-    let ring = CAShapeLayer()
-    ring.bounds = CGRect(x: 0, y: 0, width: side, height: side)
-    ring.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-    ring.position = center
-    ring.path = StatusIcon.listeningRingPath(side: side)
-    ring.fillColor = nil
-    ring.strokeColor = color
-    ring.lineWidth = 1.5
-    host.addSublayer(ring)
-
-    let dot = CAShapeLayer()
+    let dot = CALayer()
     dot.bounds = CGRect(x: 0, y: 0, width: side, height: side)
     dot.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-    dot.position = center
-    dot.path = StatusIcon.listeningDotPath(side: side)
-    dot.fillColor = color
+    dot.position = glyphCenter(in: host, side: side)
+    dot.contents = StatusIcon.dotBitmap(color: glyphColor(for: button))
+    dot.contentsScale = 2
     host.addSublayer(dot)
+    artLayers = [dot]
 
     let breathe = CABasicAnimation(keyPath: "transform.scale")
     breathe.fromValue = 1.0
-    breathe.toValue = 1.32
-    breathe.duration = 1.15
+    breathe.toValue = 1.26
+    breathe.duration = 1.3
     breathe.autoreverses = true
     breathe.repeatCount = .infinity
     breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+    breathe.preferredFrameRateRange = CAFrameRateRange(minimum: 10, maximum: 15, preferred: 12)
     dot.add(breathe, forKey: "dsh.breathe")
-
-    artLayers = [ring, dot]
-    button.image = nil
   }
 
   private func stopArt() {

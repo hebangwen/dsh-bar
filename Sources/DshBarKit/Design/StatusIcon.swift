@@ -58,6 +58,39 @@ public enum StatusIcon {
     return path
   }
 
+  /// The listening ring alone, as a template image: the menu bar tints it, so the
+  /// static part of the glyph stays free of layer colours.
+  public static func listeningRingImage() -> NSImage {
+    icon { center in
+      ring(center: center, radius: 5.6, width: 1.5)
+    }
+  }
+
+  /// A prepared bitmap for a layer to animate.
+  ///
+  /// `CAShapeLayer` re-rasterises its path on every frame it is composited, which
+  /// is what made the first version expensive: the window server was redrawing
+  /// the menu bar sixty times a second for a vector path. A bitmap texture is
+  /// scaled by the compositor instead, so the animation costs no redraw at all.
+  public static func bitmap(
+    for phase: HarnessPhase,
+    owner: ServerOwner,
+    color: NSColor,
+    side: CGFloat = 18,
+    scale: CGFloat = 2
+  ) -> CGImage? {
+    tinted(image(for: phase, owner: owner), color: color, side: side, scale: scale)
+  }
+
+  public static func dotBitmap(
+    radius: CGFloat = 2.4,
+    color: NSColor,
+    side: CGFloat = 18,
+    scale: CGFloat = 2
+  ) -> CGImage? {
+    tinted(dotImage(radius: radius, side: side), color: color, side: side, scale: scale)
+  }
+
   /// The listening glyph split into ring and dot, so the dot can breathe while
   /// the ring stays put. Same radii the static image draws.
   public static func listeningRingPath(side: CGFloat = 18) -> CGPath {
@@ -116,6 +149,51 @@ public enum StatusIcon {
         }
       })
     }
+  }
+
+  // MARK: - Bitmaps
+
+  private static func dotImage(radius: CGFloat, side: CGFloat) -> NSImage {
+    icon { center in
+      dot(center: center, radius: radius)
+    }
+  }
+
+  /// Draw the black glyph, recolour it, and bake it at `scale` so a layer has a
+  /// texture instead of a path.
+  private static func tinted(
+    _ image: NSImage,
+    color: NSColor,
+    side: CGFloat,
+    scale: CGFloat
+  ) -> CGImage? {
+    let points = NSSize(width: side, height: side)
+    let drawn = NSImage(size: points, flipped: false) { rect in
+      image.draw(in: rect)
+      color.set()
+      rect.fill(using: .sourceAtop)
+      return true
+    }
+    guard
+      let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: Int(points.width * scale),
+        pixelsHigh: Int(points.height * scale),
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+      )
+    else { return nil }
+    rep.size = points
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    drawn.draw(in: NSRect(origin: .zero, size: points))
+    NSGraphicsContext.restoreGraphicsState()
+    return rep.cgImage
   }
 
   // MARK: - Drawing

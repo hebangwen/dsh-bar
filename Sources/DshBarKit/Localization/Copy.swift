@@ -51,6 +51,16 @@ public struct Copy: Sendable {
 
   public var settings: String { zh("设置", "Settings") }
 
+  // MARK: - Settings tabs
+
+  public var tabGeneral: String { zh("通用", "General") }
+
+  public var tabWorkspace: String { zh("工作区", "Workspace") }
+
+  public var tabEnvironment: String { zh("环境", "Environment") }
+
+  public var tabBehavior: String { zh("行为", "Behavior") }
+
   public var port: String { zh("端口", "port") }
 
   public var profile: String { "profile" }
@@ -90,7 +100,7 @@ public struct Copy: Sendable {
       return zh("正在关闭进程", "closing the process")
     case .listening:
       if snapshot.owner == .external {
-        return zh("由终端启动", "started in a terminal")
+        return snapshot.handoff ? handoffBadge : zh("由终端启动", "started in a terminal")
       }
       return snapshot.uptime.map { duration($0) }
     case .failed:
@@ -121,8 +131,11 @@ public struct Copy: Sendable {
     case .starting:
       return zh("取消", "Cancel")
     case .failed:
-      if snapshot.failure?.port != nil { return zh("换一个空闲端口", "Use a free port") }
-      return zh("查看日志", "Show log")
+      switch snapshot.failure?.recovery {
+      case .freePort: return zh("换一个空闲端口", "Use a free port")
+      case .defaultPaths: return zh("改回默认", "Use defaults")
+      case nil: return zh("查看日志", "Show log")
+      }
     case .stopped, .stopping, .unavailable:
       return nil
     }
@@ -213,6 +226,181 @@ public struct Copy: Sendable {
 
   public var notDetected: String { zh("未找到", "not found") }
 
+  // MARK: - Workspace & DSH_HOME
+
+  public var workspaceField: String { zh("工作目录", "Directory") }
+
+  public var workspacePlaceholder: String {
+    zh("dsh 默认", "dsh default")
+  }
+
+  public var dshHomeField: String { "DSH_HOME" }
+
+  public var useDefault: String { zh("默认", "Default") }
+
+  public var chooseLink: String { zh("选择…", "Choose…") }
+
+  public var followShell: String { zh("跟随 shell", "From shell") }
+
+  public var overrideShell: String { zh("指定", "Set") }
+
+  public var workspaceChooseMessage: String {
+    zh(
+      "选择 dsh 启动时所在的工作目录（项目文件夹）。",
+      "Choose the directory dsh starts in — the project folder."
+    )
+  }
+
+  /// A relative path is not a typo worth guessing at: a GUI app's working directory
+  /// is `/`, and dsh would inherit a directory the user never meant.
+  public var reading: String { zh("读取中…", "reading…") }
+
+  public func notAFolder(_ path: String) -> String {
+    zh("不是文件夹：\(path)", "Not a folder: \(path)")
+  }
+
+  public func noSuchFolder(_ path: String) -> String {
+    zh("文件夹不存在：\(path)", "No such folder: \(path)")
+  }
+
+  public var detectionMissing: String {
+    zh(
+      "在登录 shell 的 PATH、nvm、Homebrew 里都没找到。",
+      "Not on the login shell PATH, in nvm, or in Homebrew."
+    )
+  }
+
+  public var relativePathRejected: String {
+    zh("相对路径不可用：GUI app 的当前目录是 /。", "A relative path can't work: a GUI app's directory is /.")
+  }
+
+  public var workspaceNote: String {
+    zh(
+      "留空 = dsh 自己的默认工作区（~/Documents/deepseek-harness）；填了会先检查，目录不存在就不启动。",
+      "Empty means dsh's own workspace (~/Documents/deepseek-harness); a set folder is checked, and a missing one blocks the start."
+    )
+  }
+
+  public var dshHomeNote: String {
+    zh(
+      "「跟随 shell」沿用登录 shell 的 DSH_HOME；「指定」留空等于 ~/.dsh。",
+      "\"From shell\" keeps the login shell's DSH_HOME; \"Set\" with an empty field means ~/.dsh."
+    )
+  }
+
+  // MARK: - Environment
+
+  public var environmentSourceField: String { zh("来源", "Source") }
+
+  public var environmentPathField: String { zh("PATH", "PATH") }
+
+  public var environmentNodeField: String { "node" }
+
+  public var environmentTimingField: String { zh("耗时", "Took") }
+
+  public var reread: String { zh("重新读取", "Read again") }
+
+  public func environmentSource(_ source: LoginShellEnvironment.Source) -> String {
+    switch source {
+    case .interactiveShell: return zh("交互式登录 shell", "interactive login shell")
+    case .loginShell: return zh("登录 shell（未读 rc）", "login shell (no rc)")
+    case .process: return zh("进程环境", "process environment")
+    }
+  }
+
+  public var environmentFallbackNote: String {
+    zh(
+      "没有 shell 应答，用的是 app 自己的环境——里面几乎没有东西；检查 ~/.zshrc 里 nvm 的导出。",
+      "No shell answered, so this is the app's own environment, which has almost nothing in it. Check the nvm export in ~/.zshrc."
+    )
+  }
+
+  public var environmentLoginShellNote: String {
+    zh(
+      "只读到登录 shell：~/.zshrc 里的导出（nvm、代理）没有生效，dsh 可能找不到 node。",
+      "Only the login shell answered: exports from ~/.zshrc (nvm, proxies) are missing, so dsh may not find node."
+    )
+  }
+
+  public var environmentNodeMissing: String { zh("没有 node", "no node") }
+
+  public func environmentTiming(_ report: EnvironmentReport) -> String {
+    "\(report.durationMs) ms"
+  }
+
+  // MARK: - Quit
+
+  public var quitField: String { zh("退出时", "On quit") }
+
+  public var quitNote: String {
+    zh(
+      "「保持运行」会留下 dsh，下次打开 dsh bar 时按 pid 和端口认回来，仍然可以接管或停止。",
+      "\"Keep it running\" leaves dsh alive; the next launch recognises it by pid and port, and it can still be taken over or stopped."
+    )
+  }
+
+  public var handoffNote: String {
+    zh(
+      "上次由 dsh bar 启动，退出时保留了它。没有启动令牌，浏览器里若提示未授权，请接管或从终端打开。",
+      "Started by dsh bar, kept alive when the app quit. There is no launch token: if the browser says unauthorized, take it over or open it from the terminal."
+    )
+  }
+
+  public var handoffBadge: String { zh("上次由 dsh bar 启动", "started by dsh bar") }
+
+  public var quitAskTitle: String { zh("退出 dsh bar？", "Quit dsh bar?") }
+
+  public var quitAskBody: String {
+    zh(
+      "有一个由 dsh bar 启动的 dsh 正在监听。退出时停掉它，还是让它继续跑？",
+      "A dsh started by dsh bar is listening. Stop it as the app quits, or leave it running?"
+    )
+  }
+
+  public var quitAskStop: String { zh("退出并停止", "Quit and stop") }
+
+  public var quitAskKeep: String { zh("退出但保留", "Quit and keep") }
+
+  public var quitAskRemember: String { zh("记住我的选择", "Remember my choice") }
+
+  // MARK: - Shortcut
+
+  public var shortcutField: String { zh("唤起面板", "Show panel") }
+
+  public var shortcutNote: String {
+    zh(
+      "在任何 app 里都能唤起面板；不需要辅助功能授权。",
+      "Shows the panel from any app; no Accessibility permission needed."
+    )
+  }
+
+  public var shortcutTaken: String {
+    zh("已被其它应用占用，换一个或关闭。", "Another app already owns it. Pick another or turn it off.")
+  }
+
+  // MARK: - Launch at login
+
+  public var launchAtLoginField: String { zh("开机自启", "Launch at login") }
+
+  public var openLoginItems: String { zh("打开登录项…", "Open Login Items…") }
+
+  public func loginItemState(_ status: LoginItemStatus) -> String {
+    switch status {
+    case .enabled: return zh("已开启", "on")
+    case .requiresApproval: return zh("等待系统批准", "waiting for approval")
+    case .notRegistered: return zh("未开启", "off")
+    case .unavailable: return zh("不可用", "unavailable")
+    }
+  }
+
+  public var loginItemUnavailableHere: String {
+    zh("需要以 .app 运行才能注册登录项", "needs to run as a .app to register")
+  }
+
+  public var loginItemUnsigned: String {
+    zh("ad-hoc 签名每次构建都会变，先固定签名再开", "an ad-hoc signature changes every build; sign it first")
+  }
+
   // MARK: - Folder access
 
   /// `~/Documents` is TCC-protected; dsh's default workspace lives inside it, so
@@ -252,8 +440,8 @@ public struct Copy: Sendable {
 
   public var folderNote: String {
     zh(
-      "只在点「启动」时问一次：dsh bar 把选择记成书签，之后每次启动直接读，不再弹系统确认。",
-      "Asked once, when you press Start. dsh bar stores the choice as a bookmark and reads it directly on every later launch, with no system sheet."
+      "只在点「启动」时问一次，之后用书签直接读。",
+      "Asked once, when you press Start; the bookmark is read directly after that."
     )
   }
 
@@ -322,6 +510,22 @@ public struct Copy: Sendable {
         zh(
           "dsh 是 #!/usr/bin/env node 脚本，但 dsh bar 拿到的 PATH 里没有 node。图形界面启动的 app 不会读 ~/.zshrc，而 nvm 一般只写在那里——dsh bar 现在会读交互式登录 shell，并把 dsh 所在目录放到 PATH 最前面。仍然失败时，检查 ~/.zshrc 里 nvm 的导出，或把 node 装到 /opt/homebrew/bin。",
           "dsh is a #!/usr/bin/env node script, but no node is on the PATH dsh bar builds. A GUI-launched app never reads ~/.zshrc, which is where nvm normally lives; dsh bar now reads the interactive login shell and puts dsh's own directory first on PATH. If it still fails, check the nvm export in ~/.zshrc, or install node somewhere on PATH."
+        )
+      )
+    case .workspaceMissing(let path):
+      return (
+        zh("工作目录不可用。", "The working directory is unusable."),
+        zh(
+          "dsh bar 不能在这个目录里启动 dsh：\(path)。它不存在，或者不是文件夹——GUI app 的当前目录是 /，所以相对路径也没有意义。点「改回默认」，让 dsh 用自己的工作区。",
+          "dsh bar can't start dsh in \(path): it is missing, or not a folder. A GUI app's working directory is /, so a relative path means nothing here. Press Use defaults and let dsh pick its own workspace."
+        )
+      )
+    case .dshHomeMissing(let path):
+      return (
+        zh("DSH_HOME 不可用。", "DSH_HOME is unusable."),
+        zh(
+          "设置里指定的 DSH_HOME 指向 \(path)，但它不是文件夹，dsh bar 也不会替你覆盖它。点「改回默认」，跟随登录 shell 的 DSH_HOME。",
+          "The DSH_HOME in Settings points at \(path), which is not a folder — and dsh bar will not overwrite it. Press Use defaults to follow the login shell's DSH_HOME again."
         )
       )
     case .binaryMissing:

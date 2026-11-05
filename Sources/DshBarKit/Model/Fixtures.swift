@@ -13,6 +13,10 @@ public enum DemoScene: String, Sendable, CaseIterable {
   case stopping
   case failedPort
   case failedExit
+  /// M3: a launch refused because the configured workspace is gone.
+  case failedWorkspace
+  /// M3: a server this app started in an earlier run and kept alive.
+  case listeningHandoff
 
   public var title: String {
     switch self {
@@ -24,6 +28,8 @@ public enum DemoScene: String, Sendable, CaseIterable {
     case .stopping: return "stopping"
     case .failedPort: return "failed-port"
     case .failedExit: return "failed-exit"
+    case .failedWorkspace: return "failed-workspace"
+    case .listeningHandoff: return "listening-handoff"
     }
   }
 }
@@ -127,6 +133,34 @@ public enum Fixtures {
         port: port,
         failure: HarnessFailure(kind: .exited(code: 1), detail: "Error: listen EADDRINUSE"),
         log: failureLog(port: port)
+      )
+    case .failedWorkspace:
+      return HarnessSnapshot(
+        phase: .failed,
+        port: port,
+        failure: HarnessFailure(
+          kind: .workspaceMissing(path: "/Users/you/Code/dsh-lab"),
+          detail: "no such folder"
+        ),
+        log: [
+          LogLine(
+            id: 0,
+            time: "22:04:09",
+            text: "dsh bar: not spawning: the working directory is unusable — /Users/you/Code/dsh-lab",
+            emphasized: true,
+            stream: .err
+          )
+        ]
+      )
+    case .listeningHandoff:
+      return HarnessSnapshot(
+        phase: .listening,
+        port: port,
+        owner: .external,
+        hasLaunchURL: false,
+        uptime: nil,
+        log: [],
+        handoff: true
       )
     }
   }

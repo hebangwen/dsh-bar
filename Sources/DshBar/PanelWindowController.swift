@@ -81,7 +81,7 @@ final class PanelWindowController: NSObject {
     anchorButton = button
     isVisible = true
     resync(animated: false)
-    NSApp.activate(ignoringOtherApps: true)
+    NSApp.activate()
     window.makeKeyAndOrderFront(nil)
 
     // `DSHBAR_SNAPSHOT_WINDOW=<path>` writes exactly what the window draws, so

@@ -39,8 +39,23 @@ public struct HarnessFailure: Sendable, Equatable {
     /// get. Its own error line (`env: node: No such file or directory`) reads like
     /// a dsh problem, so it gets its own kind and its own explanation.
     case nodeMissing
+    /// The configured working directory is not there. `posix_spawn` would fail with
+    /// an unrelated error, so the app refuses the spawn and says which path it is.
+    case workspaceMissing(path: String)
+    /// `DSH_HOME` is configured but points at something that is not a directory.
+    case dshHomeMissing(path: String)
     case exited(code: Int32?)
     case timeout(seconds: Int)
+  }
+
+  /// The one-click repair offered next to a failure. Failures without a recovery
+  /// keep the single "Try again" button, so the panel never invents an action that
+  /// cannot work.
+  public enum Recovery: Sendable, Equatable {
+    /// Let the OS pick a port instead.
+    case freePort
+    /// Forget the configured workspace / `DSH_HOME` and go back to dsh's defaults.
+    case defaultPaths
   }
 
   public var kind: Kind
@@ -54,6 +69,22 @@ public struct HarnessFailure: Sendable, Equatable {
   public var port: Int? {
     if case let .portInUse(port) = kind { return port }
     return nil
+  }
+
+  public var recovery: Recovery? {
+    switch kind {
+    case .portInUse: return .freePort
+    case .workspaceMissing, .dshHomeMissing: return .defaultPaths
+    case .binaryMissing, .nodeMissing, .exited, .timeout: return nil
+    }
+  }
+
+  /// The path the failure is about, when it is about one.
+  public var path: String? {
+    switch kind {
+    case .workspaceMissing(let path), .dshHomeMissing(let path): return path
+    default: return nil
+    }
   }
 }
 
@@ -101,6 +132,10 @@ public struct HarnessSnapshot: Sendable, Equatable {
   public var log: [LogLine]
   /// True while a transition is in flight, so actions disable themselves.
   public var busy: Bool
+  /// The external server on the port is one this app started in an earlier run and
+  /// left alive on purpose. It changes the explanation, never the actions: it is
+  /// still an external process with no token.
+  public var handoff: Bool
 
   public init(
     phase: HarnessPhase = .stopped,
@@ -113,7 +148,8 @@ public struct HarnessSnapshot: Sendable, Equatable {
     lastRun: String? = nil,
     failure: HarnessFailure? = nil,
     log: [LogLine] = [],
-    busy: Bool = false
+    busy: Bool = false,
+    handoff: Bool = false
   ) {
     self.phase = phase
     self.host = host
@@ -126,6 +162,7 @@ public struct HarnessSnapshot: Sendable, Equatable {
     self.failure = failure
     self.log = log
     self.busy = busy
+    self.handoff = handoff
   }
 
   public var address: String { "\(host):\(port)" }

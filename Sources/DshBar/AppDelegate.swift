@@ -9,6 +9,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var status: StatusItemController!
   private var settingsWindow: NSWindow?
   private var terminationSource: DispatchSourceSignal?
+  private let hotKey = HotKeyCenter()
+  private var showPanelObserver: NSObjectProtocol?
+  /// The answer to "keep it running?" when the quit policy is `ask`.
+  private var quitKeepsServer = false
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
@@ -26,6 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       onQuit: { NSApp.terminate(nil) }
     )
     status.install()
+    installHotKey()
+    installShowPanelObserver()
 
     // The port may already serve a dsh someone started in a terminal; look once at
     // launch so the panel opens telling the truth.
@@ -84,10 +90,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     terminationSource = source
   }
 
-  /// A managed server must not outlive the app that started it: the panel is the
-  /// only place that knows the token and the pid.
+  /// The question is asked *before* termination starts. `applicationWillTerminate`
+  /// runs after the app has begun tearing down, and a modal there can hold up a
+  /// logout or a `SIGTERM` that arrived from outside.
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    let ownsServer = model.snapshot.phase == .listening && model.snapshot.owner == .dshBar
+    guard ownsServer, model.effectiveQuitBehavior == .ask else { return .terminateNow }
+    quitKeepsServer = askWhetherToKeep()
+    return .terminateNow
+  }
+
+  /// Quitting is where the "keep it running" preference is honoured. The choice is
+  /// made once, here, for a server this app actually owns; an external one was
+  /// never ours to stop.
   func applicationWillTerminate(_ notification: Notification) {
-    model.shutdown()
+    let behavior = model.effectiveQuitBehavior
+    let ownsServer = model.snapshot.phase == .listening && model.snapshot.owner == .dshBar
+    guard ownsServer else {
+      model.shutdown()
+      return
+    }
+    switch behavior {
+    case .stopManaged:
+      model.shutdown()
+    case .keepRunning:
+      model.keepRunning()
+    case .ask:
+      quitKeepsServer ? model.keepRunning() : model.shutdown()
+    }
+  }
+
+  /// The three-way quit, asked once at the moment it matters. Returns `true` when
+  /// the server should be left alive.
+  private func askWhetherToKeep() -> Bool {
+    NSApp.activate()
+    let alert = NSAlert()
+    alert.messageText = model.copy.quitAskTitle
+    alert.informativeText = model.copy.quitAskBody
+    alert.addButton(withTitle: model.copy.quitAskStop)
+    alert.addButton(withTitle: model.copy.quitAskKeep)
+    let remember = NSButton(checkboxWithTitle: model.copy.quitAskRemember, target: nil, action: nil)
+    remember.state = .off
+    alert.accessoryView = remember
+    let keep = alert.runModal() == .alertSecondButtonReturn
+    if remember.state == .on {
+      model.update(quitBehavior: keep ? .keepRunning : .stopManaged)
+    }
+    return keep
   }
 
   // MARK: - Panel actions
@@ -106,10 +155,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       case .listening: model.stop()
       case .starting: model.cancel()
       case .failed:
-        // "Use a free port" is the second button on a port failure; retry is the
-        // first. Port 0 asks the OS and adopts what it gives back.
-        if model.snapshot.failure?.port != nil {
+        // The second button is the repair the diagnosis suggests; retry is the
+        // first. Each recovery is one preference change away from a usable launch.
+        switch model.snapshot.failure?.recovery {
+        case .freePort:
+          // Port 0 asks the OS and adopts what it gives back.
           model.update(port: BarPreferences.autoPort)
+        case .defaultPaths:
+          model.resetLaunchPaths()
+        case nil:
+          break
         }
         startFromPanel()
       default: break
@@ -169,7 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       settingsWindow = window
     }
     panel.hide(returnFocus: false)
-    NSApp.activate(ignoringOtherApps: true)
+    NSApp.activate()
     settingsWindow?.makeKeyAndOrderFront(nil)
 
     // `DSHBAR_SNAPSHOT_SETTINGS=<path>` renders the sheet offscreen, the same way
@@ -178,18 +233,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if let path = ProcessInfo.processInfo.environment["DSHBAR_SNAPSHOT_SETTINGS"] {
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
         guard let self else { return }
-        let renderer = ImageRenderer(
-          content: SettingsView(model: self.model)
-            .frame(width: SettingsMetrics.width, height: SettingsMetrics.height)
-        )
-        renderer.scale = 2
-        guard
-          let image = renderer.nsImage,
-          let tiff = image.tiffRepresentation,
-          let rep = NSBitmapImageRep(data: tiff),
-          let data = rep.representation(using: .png, properties: [:])
-        else { return }
-        try? data.write(to: URL(fileURLWithPath: path))
+        let base = URL(fileURLWithPath: path)
+        let stem = base.deletingPathExtension().lastPathComponent
+        let folder = base.deletingLastPathComponent()
+        // One PNG per pane: the tab strip means a single render can no longer show
+        // the whole window, and the review sheets want every pane.
+        let wantsDark = ProcessInfo.processInfo.environment["DSHBAR_SNAPSHOT_DARK"] == "1"
+        for tab in SettingsTab.allCases {
+          for scheme in wantsDark ? [ColorScheme.light, .dark] : [ColorScheme.light] {
+            // A settings window has no plate of its own — the window background
+            // provides it. Offscreen there is no window, so the renderer paints the
+            // scheme's plate itself, otherwise the dark pass is white on white.
+            let renderer = ImageRenderer(
+              content: SettingsView(model: self.model, scrolls: false, tab: tab)
+                .frame(width: SettingsMetrics.width, height: SettingsMetrics.snapshotHeight)
+                .background(Palette.forScheme(scheme).plate)
+                .environment(\.colorScheme, scheme)
+            )
+            renderer.scale = 2
+            guard
+              let image = renderer.nsImage,
+              let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let data = rep.representation(using: .png, properties: [:])
+            else { continue }
+            var name = tab == .general ? base.lastPathComponent : "\(stem)-\(tab.rawValue).png"
+            if scheme == .dark {
+              name = (name as NSString).deletingPathExtension + "-dark.png"
+            }
+            try? data.write(to: folder.appendingPathComponent(name))
+          }
+        }
+      }
+    }
+  }
+
+  // MARK: - Shortcut & second launch
+
+  private func installHotKey() {
+    hotKey.onTrigger = { [weak self] in
+      guard let self else { return }
+      self.panel.toggle(relativeTo: self.status.button)
+    }
+    model.onHotKeyChange = { [weak self] choice in
+      self?.applyHotKey(choice)
+    }
+    applyHotKey(model.preferences.hotKey)
+  }
+
+  /// Register the chord and remember what actually happened.
+  ///
+  /// A failure is **not** written into the preference: "taken" is often transient
+  /// (another copy of the app is running, or the user is about to free the chord),
+  /// and silently rewriting someone's setting because of it is worse than showing
+  /// the red line and letting them choose.
+  @discardableResult
+  private func applyHotKey(_ choice: HotKeyChoice) -> HotKeyStatus {
+    let status = hotKey.apply(choice)
+    model.recordHotKeyStatus(status)
+    return status
+  }
+
+  /// A second `open` of the same bundle lands here: this copy shows its panel
+  /// instead of the user getting a second, invisible menu bar icon.
+  private func installShowPanelObserver() {
+    showPanelObserver = DistributedNotificationCenter.default().addObserver(
+      forName: SingleInstance.showPanelNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        self.panel.show(relativeTo: self.status.button)
       }
     }
   }

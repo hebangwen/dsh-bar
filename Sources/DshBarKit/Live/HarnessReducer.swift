@@ -42,6 +42,8 @@ public enum HarnessEvent: Sendable, Equatable {
   case preferencesChanged(port: Int, profile: String)
   /// A dsh someone else started is on the port we are supposed to use.
   case observedExternal(port: Int)
+  /// A server this app started in an earlier run and kept alive on purpose.
+  case observedHandoff(port: Int)
   /// That server is gone again.
   case observedFree(port: Int)
   case portChecked(PortState, port: Int)
@@ -125,6 +127,7 @@ public enum HarnessReducer {
       next.snapshot.port = port
       next.snapshot.profile = profile
       next.snapshot.lastRun = nil
+      next.snapshot.handoff = false
       next.launchURL = nil
       next.startedAt = nil
       next.intentionalStop = false
@@ -147,6 +150,7 @@ public enum HarnessReducer {
       case .dsh:
         next.snapshot.phase = .listening
         next.snapshot.owner = .external
+        next.snapshot.handoff = false
         next.snapshot.hasLaunchURL = false
         next.snapshot.uptime = nil
         next.snapshot.busy = false
@@ -170,21 +174,12 @@ public enum HarnessReducer {
       next.snapshot.profile = profile
 
     case .observedExternal(let port):
-      // Only a fresh stop can become an external server; anything else already
-      // knows what it is looking at.
-      guard next.snapshot.phase == .stopped else { return (state, []) }
-      next.snapshot.phase = .listening
-      next.snapshot.owner = .external
-      next.snapshot.hasLaunchURL = false
-      next.snapshot.uptime = nil
-      next.snapshot.busy = false
-      next.snapshot.failure = nil
-      next.snapshot.port = port
-      next.snapshot.log = []
-      next.launchURL = nil
-      next.startedAt = nil
-      next.announced = false
-      commands = [.stopUptime]
+      guard let adopted = adoptExternal(next, port: port, handoff: false) else { return (state, []) }
+      return (adopted, [.stopUptime])
+
+    case .observedHandoff(let port):
+      guard let adopted = adoptExternal(next, port: port, handoff: true) else { return (state, []) }
+      return (adopted, [.stopUptime])
 
     case .observedFree(let port):
       // An external server that disappears is not a failure: the user closed it
@@ -197,6 +192,7 @@ public enum HarnessReducer {
       next.snapshot.busy = false
       next.snapshot.uptime = nil
       next.snapshot.hasLaunchURL = false
+      next.snapshot.handoff = false
       next.snapshot.failure = nil
       next.snapshot.lastRun = justNow(language)
       next.launchURL = nil
@@ -205,6 +201,7 @@ public enum HarnessReducer {
     case .spawnFailed(let failure):
       next.snapshot.phase = .failed
       next.snapshot.busy = false
+      next.snapshot.handoff = false
       next.snapshot.failure = failure
       next.snapshot.hasLaunchURL = false
       next.snapshot.uptime = nil
@@ -252,6 +249,7 @@ public enum HarnessReducer {
     case .exited(let code, let signal):
       next.snapshot.uptime = nil
       next.snapshot.hasLaunchURL = false
+      next.snapshot.handoff = false
       next.launchURL = nil
       next.startedAt = nil
       next.announced = false
@@ -304,6 +302,7 @@ public enum HarnessReducer {
       next.snapshot.hasLaunchURL = false
       next.snapshot.uptime = nil
       next.snapshot.failure = HarnessFailure(kind: .portInUse(port: port), detail: detail)
+      next.snapshot.handoff = false
       next.launchURL = nil
       next.intentionalStop = false
       commands = [.stopUptime, .disarmReadyTimeout]
@@ -349,10 +348,31 @@ public enum HarnessReducer {
       next.snapshot.failure = nil
       next.snapshot.log = []
       next.snapshot.lastRun = nil
+      next.snapshot.handoff = false
       commands = [.stopUptime, .disarmReadyTimeout]
     }
 
     return (next, commands)
+  }
+
+  /// Both "someone else is on the port" cases land in the same state; only the note
+  /// on the panel differs. One body keeps them from drifting apart.
+  private static func adoptExternal(_ state: HarnessState, port: Int, handoff: Bool) -> HarnessState? {
+    guard state.snapshot.phase == .stopped else { return nil }
+    var next = state
+    next.snapshot.phase = .listening
+    next.snapshot.owner = .external
+    next.snapshot.handoff = handoff
+    next.snapshot.hasLaunchURL = false
+    next.snapshot.uptime = nil
+    next.snapshot.busy = false
+    next.snapshot.failure = nil
+    next.snapshot.port = port
+    next.snapshot.log = []
+    next.launchURL = nil
+    next.startedAt = nil
+    next.announced = false
+    return next
   }
 
   private static func justNow(_ language: UILanguage) -> String {

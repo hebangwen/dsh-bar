@@ -28,6 +28,9 @@ public final class ChildProcess {
   private var pending: [LogStream: Data] = [:]
   private let stateLock = NSLock()
   private var reportedExit = false
+  /// Set by `detach()`: the caller is handing the process over (the "keep it
+  /// running" quit), so releasing the last reference must not signal it.
+  private var detached = false
   /// Lines that arrived before `onLine` was attached. The child starts reading in
   /// `init`, so the very first chunk can beat the handler assignment; dropping it
   /// could drop the launch URL and turn a healthy server into a 30-second timeout.
@@ -129,11 +132,24 @@ public final class ChildProcess {
     processSource = nil
 
     stateLock.lock()
-    let alreadyReaped = reportedExit
+    let shouldStop = !reportedExit && !detached
     stateLock.unlock()
-    if !alreadyReaped {
+    // Releasing a ChildProcess is the normal end of a managed server, so it stops
+    // it — unless the caller detached it first, which is what "keep it running"
+    // means. Without this flag a handoff would be killed by ARC.
+    if shouldStop {
       terminate()
     }
+  }
+
+  /// Give the process up without signalling it.
+  ///
+  /// The deinit SIGTERM is what stops an abandoned child; a handoff is the one case
+  /// where the child is supposed to outlive the app, so it has to be said out loud.
+  public func detach() {
+    stateLock.lock()
+    detached = true
+    stateLock.unlock()
   }
 
   public var isAlive: Bool {

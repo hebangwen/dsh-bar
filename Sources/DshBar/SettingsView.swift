@@ -2,25 +2,78 @@ import AppKit
 import DshBarKit
 import SwiftUI
 
-/// The settings surface: the three values process control actually needs, plus
-/// the appearance switch from the first pass.
+extension QuitBehavior: Identifiable {
+  public var id: String { rawValue }
+}
+
+extension DshHomeMode: Identifiable {
+  public var id: String { rawValue }
+}
+
+/// The four panes of the settings window. One tab strip, one pane at a time —
+/// the same shape most Mac utilities use, because a column of eight unrelated
+/// sections is a list to read rather than a window to use.
+enum SettingsTab: String, Sendable, CaseIterable, Identifiable {
+  case general
+  case workspace
+  case environment
+  case behavior
+
+  var id: String { rawValue }
+
+  var symbol: String {
+    switch self {
+    case .general: return "gearshape"
+    case .workspace: return "folder"
+    case .environment: return "terminal"
+    case .behavior: return "slider.horizontal.3"
+    }
+  }
+
+  func title(_ copy: Copy) -> String {
+    switch self {
+    case .general: return copy.tabGeneral
+    case .workspace: return copy.tabWorkspace
+    case .environment: return copy.tabEnvironment
+    case .behavior: return copy.tabBehavior
+    }
+  }
+}
+
+/// The settings window: a tab strip on top, one pane below, labels right-aligned
+/// against their controls.
 ///
-/// Edits apply immediately and are written to `UserDefaults`, so there is no Save
-/// button to forget. Validation is inline: an unusable port is reported next to
-/// the field and simply is not applied.
+/// Edits apply as they are made and go straight to `UserDefaults`, so there is no
+/// Save button to forget. Text fields commit on Return or when focus leaves — a
+/// half-typed path is not a path, and persisting one would make the panel explain a
+/// failure the user did not ask for.
 struct SettingsView: View {
   @ObservedObject var model: HarnessModel
+  /// `ImageRenderer` does not lay out a `ScrollView`, so the offscreen snapshot asks
+  /// for the same pane without one and at its full height.
+  var scrolls: Bool = true
 
+  @State private var tab: SettingsTab
   @State private var portText = ""
   @State private var portError = false
   @State private var profileText = ""
+  @State private var workspaceText = ""
+  @State private var dshHomeText = ""
+  @FocusState private var workspaceFocused: Bool
+  @FocusState private var dshHomeFocused: Bool
 
   @Environment(\.colorScheme) private var scheme
 
-  private var palette: Palette { Palette.forScheme(scheme) }
+  init(model: HarnessModel, scrolls: Bool = true, tab: SettingsTab = .general) {
+    _model = ObservedObject(wrappedValue: model)
+    self.scrolls = scrolls
+    _tab = State(initialValue: tab)
+  }
 
+  private var palette: Palette { Palette.forScheme(scheme) }
   private var copy: Copy { model.copy }
   private var labelFont: Font { .system(size: 12) }
+  private var valueFont: Font { .system(size: 11.5, design: .monospaced) }
 
   /// Read from the bundle so bumping the version is one edit in Info.plist, not a
   /// second one hidden in a view.
@@ -29,89 +82,34 @@ struct SettingsView: View {
   }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
-      sectionTitle(copy.processSection)
-
-      binaryRow
-      if let detail = detectionDetail {
-        Text(detail)
-          .font(.system(size: 10.5))
-          .foregroundStyle(.tertiary)
-          .padding(.leading, 104)
-          .padding(.top, 4)
-          .fixedSize(horizontal: false, vertical: true)
-      }
-
-      Divider().padding(.vertical, 14)
-
-      HStack(spacing: 12) {
-        Text(copy.portField)
-          .font(labelFont)
-          .foregroundStyle(.secondary)
-          .frame(width: 92, alignment: .leading)
-        TextField("", text: $portText)
-          .textFieldStyle(.roundedBorder)
-          .font(.system(size: 11.5, design: .monospaced))
-          .frame(width: 78)
-          .onChange(of: portText) { _, value in
-            applyPort(value)
-          }
-        if portError {
-          Text(copy.portInvalid)
-            .font(.system(size: 10.5))
-            .foregroundStyle(Color.red)
-        } else if model.preferences.isAutoPort {
-          Text(copy.portAuto)
-            .font(.system(size: 10.5))
-            .foregroundStyle(.tertiary)
+    VStack(spacing: 0) {
+      tabStrip
+      Divider()
+      Group {
+        if scrolls {
+          ScrollView { pane }
+        } else {
+          pane
         }
-        Spacer(minLength: 0)
       }
-
-      HStack(spacing: 12) {
-        Text(copy.profileField)
-          .font(labelFont)
-          .foregroundStyle(.secondary)
-          .frame(width: 92, alignment: .leading)
-        TextField("", text: $profileText)
-          .textFieldStyle(.roundedBorder)
-          .font(.system(size: 11.5, design: .monospaced))
-          .frame(width: 140)
-          .onChange(of: profileText) { _, value in
-            model.update(profile: value)
-          }
-        Spacer(minLength: 0)
-      }
-      .padding(.top, 10)
-
-      Divider().padding(.vertical, 14)
-
-      sectionTitle(copy.folderSection)
-
-      folderRow
-
-      Divider().padding(.vertical, 14)
-
-      sectionTitle(copy.appearanceSection)
-
-      HStack(spacing: 12) {
-        Spacer(minLength: 0)
-        InkSegmented(
-          selection: $model.appearance,
-          options: AppearanceOverride.allCases,
-          label: { $0.label(copy.language) }
-        )
-      }
-
-      Spacer(minLength: 12)
-
+      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+      Divider()
       footer
+        .padding(.horizontal, 18)
+        .padding(.vertical, 8)
     }
-    .padding(20)
-    .frame(width: SettingsMetrics.width, height: SettingsMetrics.height, alignment: .topLeading)
+    .frame(
+      width: SettingsMetrics.width,
+      height: scrolls ? SettingsMetrics.height : SettingsMetrics.snapshotHeight,
+      alignment: .topLeading
+    )
     .onAppear {
       syncFields()
       model.refreshDocumentsAccess(probe: false)
+      model.refreshLaunchAtLogin()
+      if model.environmentReport == nil {
+        model.rereadEnvironment()
+      }
     }
     .onChange(of: model.preferences) { _, next in
       // The controller can change the port itself ("use a free port"), so the
@@ -123,76 +121,431 @@ struct SettingsView: View {
       if profileText != next.profile {
         profileText = next.profile
       }
+      if !workspaceFocused {
+        let expected = next.workspacePath.map { LaunchTarget.shortPath($0) } ?? ""
+        if workspaceText != expected { workspaceText = expected }
+      }
+      if !dshHomeFocused {
+        let expected = next.dshHome.map { LaunchTarget.shortPath($0) } ?? ""
+        if dshHomeText != expected { dshHomeText = expected }
+      }
     }
   }
 
-  // MARK: - Rows
+  // MARK: - Tab strip
 
-  private var binaryRow: some View {
-    HStack(alignment: .firstTextBaseline, spacing: 12) {
-      Text(copy.binaryPath)
-        .font(labelFont)
-        .foregroundStyle(.secondary)
-        .frame(width: 92, alignment: .leading)
+  /// Icon over word, one pane selected. The plate is a faint ink wash rather than an
+  /// accent colour: the panel's whole vocabulary is monochrome, and the settings
+  /// window is part of the same instrument.
+  private var tabStrip: some View {
+    HStack(spacing: 2) {
+      Spacer(minLength: 0)
+      ForEach(SettingsTab.allCases) { item in
+        Button {
+          tab = item
+        } label: {
+          VStack(spacing: 4) {
+            Image(systemName: item.symbol)
+              .font(.system(size: 17, weight: .regular))
+            Text(item.title(copy))
+              .font(.system(size: 10.5))
+              .lineLimit(1)
+          }
+          .frame(width: 82, height: 52)
+          .foregroundStyle(tab == item ? AnyShapeStyle(palette.ink) : AnyShapeStyle(palette.inkTertiary))
+          .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+              .fill(tab == item ? AnyShapeStyle(palette.ink.opacity(0.07)) : AnyShapeStyle(Color.clear))
+          )
+          .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(item.title(copy))
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(.horizontal, 12)
+    .padding(.top, 8)
+    .padding(.bottom, 6)
+  }
 
-      Text(model.detectedPath ?? copy.notDetected)
-        .font(.system(size: 11.5, design: .monospaced))
-        .foregroundStyle(model.detectedPath == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-        .lineLimit(1)
-        .truncationMode(.middle)
-        .help(model.detectedPath ?? copy.chooseBinary)
+  // MARK: - Panes
 
-      Spacer(minLength: 8)
-
-      Button(copy.change) { chooseBinary() }
-        .controlSize(.small)
-      Button(copy.detectAgain) { model.refreshDetection() }
-        .controlSize(.small)
+  @ViewBuilder
+  private var pane: some View {
+    switch tab {
+    case .general: generalPane
+    case .workspace: workspacePane
+    case .environment: environmentPane
+    case .behavior: behaviorPane
     }
   }
 
-  /// `~/Documents` holds dsh's default workspace and is TCC-protected, so the row
-  /// has to be honest about two different things: whether a bookmark is remembered,
-  /// and whether a read works right now.
-  private var folderRow: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      HStack(alignment: .firstTextBaseline, spacing: 12) {
-        Text(copy.documentsFolder)
-          .font(labelFont)
-          .foregroundStyle(.secondary)
-          .frame(width: 92, alignment: .leading)
+  private var generalPane: some View {
+    VStack(alignment: .leading, spacing: SettingsMetrics.rowGap) {
+      row(copy.binaryPath) {
+        Text(model.detectedPath ?? copy.notDetected)
+          .font(valueFont)
+          .foregroundStyle(model.detectedPath == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+          .lineLimit(1)
+          .truncationMode(.middle)
+          .help(model.detectedPath ?? copy.chooseBinary)
+        Spacer(minLength: 8)
+        Button(copy.change) { chooseBinary() }
+          .controlSize(.small)
+        Button(copy.detectAgain) { model.refreshDetection() }
+          .controlSize(.small)
+      }
+      if let detail = detectionDetail {
+        note(detail)
+      }
 
+      row(copy.portField) {
+        if isSnapshot {
+          snapshotField(
+            portText.isEmpty ? (model.preferences.isAutoPort ? "0" : String(model.preferences.port)) : portText,
+            width: 78
+          )
+        } else {
+          TextField("", text: $portText)
+            .textFieldStyle(.roundedBorder)
+            .font(valueFont)
+            .frame(width: 78)
+            .onChange(of: portText) { _, value in
+              applyPort(value)
+            }
+        }
+        if portError {
+          Text(copy.portInvalid)
+            .font(.system(size: 10.5))
+            .foregroundStyle(palette.fail)
+        } else if model.preferences.isAutoPort {
+          Text(copy.portAuto)
+            .font(.system(size: 10.5))
+            .foregroundStyle(.tertiary)
+        }
+        Spacer(minLength: 0)
+      }
+
+      row(copy.profileField) {
+        if isSnapshot {
+          snapshotField(profileText.isEmpty ? model.preferences.profile : profileText, width: 150)
+        } else {
+          TextField("", text: $profileText)
+            .textFieldStyle(.roundedBorder)
+            .font(valueFont)
+            .frame(width: 150)
+            .onChange(of: profileText) { _, value in
+              model.update(profile: value)
+            }
+        }
+        Spacer(minLength: 0)
+      }
+
+      row(copy.appearanceSection) {
+        InkSegmented(
+          selection: $model.appearance,
+          options: AppearanceOverride.allCases,
+          label: { $0.label(copy.language) }
+        )
+        Spacer(minLength: 0)
+      }
+
+      row(copy.launchAtLoginField) {
+        if isSnapshot {
+          snapshotToggle(on: model.launchAtLogin.isOn)
+        } else {
+          Toggle(
+            "",
+            isOn: Binding(
+              get: { model.launchAtLogin.isOn },
+              set: { model.setLaunchAtLogin($0) }
+            )
+          )
+          .labelsHidden()
+          .toggleStyle(.switch)
+          .controlSize(.small)
+          .disabled(!model.launchAtLogin.isOffered)
+        }
+
+        Text(copy.loginItemState(model.launchAtLogin))
+          .font(.system(size: 10.5, design: .monospaced))
+          .foregroundStyle(loginItemStyle)
+
+        Spacer(minLength: 8)
+        if model.launchAtLogin == .requiresApproval {
+          Button(copy.openLoginItems) { model.openLoginItemsSettings() }
+            .controlSize(.small)
+        }
+      }
+      if case let .unavailable(reason) = model.launchAtLogin {
+        note(reason)
+      }
+    }
+    .settingsPane(padding: SettingsMetrics.panePadding)
+  }
+
+  private var workspacePane: some View {
+    VStack(alignment: .leading, spacing: SettingsMetrics.rowGap) {
+      row(copy.workspaceField) {
+        if isSnapshot {
+          snapshotField(
+            workspaceText.isEmpty ? copy.workspacePlaceholder : workspaceText,
+            width: 250
+          )
+        } else {
+          TextField(copy.workspacePlaceholder, text: $workspaceText)
+            .textFieldStyle(.roundedBorder)
+            .font(valueFont)
+            .focused($workspaceFocused)
+            .onSubmit { applyWorkspace() }
+            .onChange(of: workspaceFocused) { _, focused in
+              if !focused { applyWorkspace() }
+            }
+        }
+        Button(copy.chooseLink) { chooseWorkspace() }
+          .controlSize(.small)
+        Button(copy.useDefault) {
+          // Clearing the text as well: while the field still has focus the
+          // preferences-change mirror is suppressed, and a later blur would write
+          // the old text straight back.
+          workspaceText = ""
+          model.update(workspacePath: nil)
+        }
+        .controlSize(.small)
+      }
+      if let problem = model.launchTarget.workspaceProblem {
+        note(problemText(problem), tone: palette.fail)
+      } else {
+        note(copy.workspaceNote)
+      }
+
+      row(copy.dshHomeField) {
+        InkSegmented(
+          selection: Binding(
+            get: { model.preferences.dshHomeMode },
+            set: { mode in
+            if mode == .followShell { dshHomeText = "" }
+            model.update(dshHomeMode: mode)
+          }
+          ),
+          options: DshHomeMode.allCases,
+          label: { $0 == .followShell ? copy.followShell : copy.overrideShell }
+        )
+        if model.preferences.dshHomeMode == .override {
+          if isSnapshot {
+            snapshotField(dshHomeText.isEmpty ? BarPreferences.defaultDshHome : dshHomeText, width: 180)
+          } else {
+            TextField(BarPreferences.defaultDshHome, text: $dshHomeText)
+              .textFieldStyle(.roundedBorder)
+              .font(valueFont)
+              .focused($dshHomeFocused)
+              .onSubmit { applyDshHome() }
+              .onChange(of: dshHomeFocused) { _, focused in
+                if !focused { applyDshHome() }
+              }
+          }
+        }
+        Spacer(minLength: 0)
+      }
+      note(
+        model.launchTarget.dshHomeProblem.map(problemText) ?? copy.dshHomeNote,
+        tone: model.launchTarget.dshHomeProblem == nil ? nil : palette.fail
+      )
+
+      Divider().padding(.vertical, 2)
+
+      row(copy.documentsFolder) {
         Text(model.documentsFolder.displayPath)
-          .font(.system(size: 11.5, design: .monospaced))
+          .font(valueFont)
           .lineLimit(1)
           .truncationMode(.middle)
           .help(model.documentsFolder.folder.path)
-
         Text(copy.folderState(model.documentsFolder))
           .font(.system(size: 10.5, design: .monospaced))
           .foregroundStyle(folderStateStyle)
           .fixedSize()
-
         Spacer(minLength: 8)
       }
+      note(folderNote)
 
-      Text(folderNote)
-        .font(.system(size: 10.5))
-        .foregroundStyle(.tertiary)
-        .padding(.leading, 104)
-        .fixedSize(horizontal: false, vertical: true)
-
-      // The actions get their own line: three buttons plus a path plus a state
-      // word do not fit in one row, and a truncated path is worse than a second line.
       HStack(spacing: 8) {
-        Spacer(minLength: 104)
+        Spacer().frame(width: SettingsMetrics.labelWidth + 14)
         Button(copy.recheck) { model.refreshDocumentsAccess() }
           .controlSize(.small)
         Button(copy.authorize) { model.grantDocumentsFolder() }
           .controlSize(.small)
         Button(copy.openSystemSettings) { model.openPrivacySettings() }
           .controlSize(.small)
+        Spacer(minLength: 0)
       }
+    }
+    .settingsPane(padding: SettingsMetrics.panePadding)
+  }
+
+  private var environmentPane: some View {
+    VStack(alignment: .leading, spacing: SettingsMetrics.rowGap) {
+      if let report = model.environmentReport {
+        row(copy.environmentSourceField) {
+          Text(copy.environmentSource(report.source))
+            .font(.system(size: 11.5))
+            .foregroundStyle(.secondary)
+          Spacer(minLength: 0)
+        }
+        row(copy.environmentPathField) {
+          Text(report.pathHead.isEmpty ? "—" : report.pathHead)
+            .font(valueFont)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .help(report.pathHead)
+          Spacer(minLength: 0)
+        }
+        row(copy.environmentNodeField) {
+          Text(nodeText(report))
+            .font(valueFont)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .help(report.nodePath ?? copy.environmentNodeMissing)
+          Spacer(minLength: 0)
+        }
+        row(copy.environmentTimingField) {
+          Text(copy.environmentTiming(report))
+            .font(valueFont)
+            .foregroundStyle(.secondary)
+          Spacer(minLength: 0)
+        }
+        if report.failureNote != nil {
+          note(environmentNote(report), tone: palette.warn)
+        }
+      } else {
+        row(copy.environmentSourceField) {
+          Text(copy.reading)
+            .font(valueFont)
+            .foregroundStyle(.tertiary)
+          Spacer(minLength: 0)
+        }
+      }
+
+      HStack(spacing: 8) {
+        Spacer().frame(width: SettingsMetrics.labelWidth + 14)
+        Button(copy.reread) { model.rereadEnvironment() }
+          .controlSize(.small)
+        Spacer(minLength: 0)
+      }
+    }
+    .settingsPane(padding: SettingsMetrics.panePadding)
+  }
+
+  private var behaviorPane: some View {
+    VStack(alignment: .leading, spacing: SettingsMetrics.rowGap) {
+      row(copy.quitField) {
+        InkSegmented(
+          selection: Binding(
+            get: { model.preferences.quitBehavior },
+            set: { model.update(quitBehavior: $0) }
+          ),
+          options: QuitBehavior.allCases,
+          label: { QuitBehavior.label($0, language: copy.language) }
+        )
+        Spacer(minLength: 0)
+      }
+      note(copy.quitNote)
+
+      row(copy.shortcutField) {
+        InkSegmented(
+          selection: Binding(
+            get: { model.preferences.hotKey },
+            set: { model.update(hotKey: $0) }
+          ),
+          options: HotKeyChoice.allCases,
+          label: { $0.label(language: copy.language) }
+        )
+        Spacer(minLength: 0)
+      }
+      if model.hotKeyStatus == .taken {
+        note(copy.shortcutTaken, tone: palette.fail)
+      } else {
+        note(copy.shortcutNote)
+      }
+    }
+    .settingsPane(padding: SettingsMetrics.panePadding)
+  }
+
+  // MARK: - Rows
+
+  /// Label right-aligned against a fixed column, controls after it. The reference for
+  /// this shape is every System Settings pane on macOS: the eye follows one vertical
+  /// line instead of reading a list.
+  private func row<Content: View>(
+    _ label: String,
+    @ViewBuilder _ content: () -> Content
+  ) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 14) {
+      Text(label)
+        .font(labelFont)
+        .foregroundStyle(.secondary)
+        .frame(width: SettingsMetrics.labelWidth, alignment: .trailing)
+        .lineLimit(1)
+        .minimumScaleFactor(0.85)
+      content()
+    }
+  }
+
+  /// `ImageRenderer` cannot draw AppKit-backed controls (`TextField`, `.switch`), so
+  /// an offscreen sheet that kept them would be a wall of yellow "no entry" boxes.
+  /// The snapshot path draws quiet read-only stand-ins with the same geometry, and
+  /// what the reader sees is the value a real field would be showing.
+  private var isSnapshot: Bool { !scrolls }
+
+  private func snapshotField(_ text: String, width: CGFloat) -> some View {
+    Text(text)
+      .font(valueFont)
+      .foregroundStyle(.primary)
+      .lineLimit(1)
+      .truncationMode(.middle)
+      .padding(.horizontal, 6)
+      .frame(width: width, height: 20, alignment: .leading)
+      .background(
+        RoundedRectangle(cornerRadius: 5, style: .continuous)
+          .fill(Color.primary.opacity(0.04))
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 5, style: .continuous)
+          .strokeBorder(palette.rule, lineWidth: 1)
+      )
+  }
+
+  private func snapshotToggle(on: Bool) -> some View {
+    HStack(spacing: 0) {
+      if on { Spacer(minLength: 0) }
+      Circle()
+        .fill(Color(nsColor: .windowBackgroundColor))
+        .frame(width: 12, height: 12)
+        .padding(2)
+      if !on { Spacer(minLength: 0) }
+    }
+    .frame(width: 30, height: 16)
+    .background(Capsule().fill(on ? AnyShapeStyle(palette.ink) : AnyShapeStyle(palette.rule)))
+  }
+
+  /// The one-line explanation under a row, aligned with the controls.
+  private func note(_ text: String, tone: Color? = nil) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 0) {
+      Spacer().frame(width: SettingsMetrics.labelWidth + 14)
+      Text(text)
+        .font(.system(size: 10.5))
+        .foregroundStyle(tone.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.tertiary))
+        .lineSpacing(2)
+        .fixedSize(horizontal: false, vertical: true)
+      Spacer(minLength: 0)
+    }
+  }
+
+  private var loginItemStyle: AnyShapeStyle {
+    switch model.launchAtLogin {
+    case .enabled: return AnyShapeStyle(.secondary)
+    case .requiresApproval: return AnyShapeStyle(palette.warn)
+    case .notRegistered, .unavailable: return AnyShapeStyle(.tertiary)
     }
   }
 
@@ -212,6 +565,33 @@ struct SettingsView: View {
     return model.documentsFolder.state == .denied ? copy.folderDeniedNote : copy.folderNote
   }
 
+  private func problemText(_ problem: LaunchPathProblem) -> String {
+    switch problem {
+    case .relative:
+      return copy.relativePathRejected
+    case .notDirectory(let path):
+      return copy.notAFolder(path)
+    case .missing(let path):
+      return copy.noSuchFolder(path)
+    }
+  }
+
+  private func nodeText(_ report: EnvironmentReport) -> String {
+    guard let path = report.nodePath else { return copy.environmentNodeMissing }
+    guard let version = report.nodeVersion else { return LaunchTarget.shortPath(path) }
+    return "\(version) · \(LaunchTarget.shortPath(path))"
+  }
+
+  private func environmentNote(_ report: EnvironmentReport) -> String {
+    switch report.source {
+    case .process: return copy.environmentFallbackNote
+    case .loginShell: return copy.environmentLoginShellNote
+    case .interactiveShell: return copy.environmentNodeMissing
+    }
+  }
+
+  // MARK: - Footer
+
   private var footer: some View {
     HStack(spacing: 8) {
       if model.demoMode {
@@ -226,18 +606,9 @@ struct SettingsView: View {
     }
   }
 
-  private func sectionTitle(_ text: String) -> some View {
-    Text(text)
-      .font(.system(size: 12, weight: .medium))
-      .foregroundStyle(.secondary)
-      .padding(.bottom, 10)
-  }
-
   private var detectionDetail: String? {
     guard model.detectedPath != nil else {
-      return copy.language == .zhHans
-        ? "在登录 shell 的 PATH、nvm、Homebrew 里都没找到。"
-        : "Not on the login shell PATH, in nvm, or in Homebrew."
+      return copy.detectionMissing
     }
     var parts: [String] = []
     if let source = model.detectedSource {
@@ -259,10 +630,40 @@ struct SettingsView: View {
     model.update(port: port)
   }
 
+  private func applyWorkspace() {
+    let trimmed = workspaceText.trimmingCharacters(in: .whitespaces)
+    let normalized = BarPreferences.normalizeWorkspacePath(trimmed)
+    model.update(workspacePath: normalized)
+    workspaceText = normalized.map { LaunchTarget.shortPath($0) } ?? ""
+  }
+
+  private func applyDshHome() {
+    let trimmed = dshHomeText.trimmingCharacters(in: .whitespaces)
+    let normalized = BarPreferences.normalizeDshHome(trimmed)
+    model.update(dshHome: normalized)
+    dshHomeText = normalized.map { LaunchTarget.shortPath($0) } ?? ""
+  }
+
+  private func chooseWorkspace() {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.allowsMultipleSelection = false
+    panel.canCreateDirectories = true
+    panel.message = copy.workspaceChooseMessage
+    panel.prompt = copy.change
+    if panel.runModal() == .OK, let url = panel.url {
+      model.update(workspacePath: url.path)
+      workspaceText = LaunchTarget.shortPath(url.path)
+    }
+  }
+
   private func syncFields() {
     portText = model.preferences.isAutoPort ? "0" : String(model.preferences.port)
     profileText = model.preferences.profile
     portError = false
+    workspaceText = model.preferences.workspacePath.map { LaunchTarget.shortPath($0) } ?? ""
+    dshHomeText = model.preferences.dshHome.map { LaunchTarget.shortPath($0) } ?? ""
   }
 
   private func chooseBinary() {
@@ -278,11 +679,28 @@ struct SettingsView: View {
   }
 }
 
-/// The settings window is a fixed-size sheet, so its height lives in one place:
+/// The settings window is a fixed-size window, so its geometry lives in one place:
 /// the view, the window, and the offscreen snapshot renderer all read it.
 enum SettingsMetrics {
-  static let width: CGFloat = 460
-  static let height: CGFloat = 436
+  static let width: CGFloat = 560
+  /// The scrolling window.
+  static let height: CGFloat = 470
+  /// The offscreen snapshot: no scroll view, so the tallest pane has to fit. Same as
+  /// the window, otherwise the sheet is shorter than what people actually see.
+  static let snapshotHeight: CGFloat = 470
+  /// The label column every row right-aligns against.
+  static let labelWidth: CGFloat = 118
+  static let rowGap: CGFloat = 16
+  static let panePadding: CGFloat = 24
+}
+
+private extension View {
+  func settingsPane(padding: CGFloat) -> some View {
+    frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.horizontal, padding)
+      .padding(.top, 20)
+      .padding(.bottom, 24)
+  }
 }
 
 /// A monochrome stand-in for the system segmented control, so settings share the

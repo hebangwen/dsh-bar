@@ -124,6 +124,26 @@ final class DemoBackend: HarnessBackend {
     stopTicking()
   }
 
+  // MARK: - Environment (fixtures)
+
+  /// A plausible report, so the settings window can be reviewed without a shell.
+  private(set) var environmentReport: EnvironmentReport? = EnvironmentReport(
+    source: .interactiveShell,
+    variableCount: 97,
+    pathHead: "~/.nvm/versions/node/v24.22.2/bin:/opt/homebrew/bin:/usr/bin",
+    nodePath: "~/.nvm/versions/node/v24.22.2/bin/node",
+    nodeVersion: "v24.22.2",
+    durationMs: 412,
+    resolvedAt: Date()
+  )
+  var onEnvironment: ((EnvironmentReport?) -> Void)?
+
+  func rereadEnvironment() {
+    onEnvironment?(environmentReport)
+  }
+
+  func prepareHandoff() {}
+
   // MARK: - Internals
 
   var currentScene: DemoScene? {

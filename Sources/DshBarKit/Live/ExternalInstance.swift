@@ -82,6 +82,12 @@ public enum ExternalInstance {
     return waitForExit(info, timeout: 1)
   }
 
+  /// Public view of the zombie-aware liveness check, for the handoff verifier:
+  /// a record that points at a corpse must not look alive.
+  public static func isAlive(_ info: Info) -> Bool {
+    isRunning(info)
+  }
+
   public static func waitForExit(_ info: Info, timeout: TimeInterval) -> Bool {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {

@@ -125,6 +125,8 @@ func runChecks() -> Int32 {
     .stopping: .stopping,
     .failedPort: .failed,
     .failedExit: .failed,
+    .failedWorkspace: .failed,
+    .listeningHandoff: .listening,
   ]
   for scene in DemoScene.allCases {
     checks.equal(Fixtures.snapshot(for: scene, copy: en).phase, expected[scene] ?? .failed, "\(scene) phase")
@@ -652,6 +654,42 @@ func runChecks() -> Int32 {
     "our own process group may not"
   )
 
+  // Releasing a ChildProcess is what stops it — that is the whole point of owning
+  // one. A handoff ("quit, keep it running") is the one case where the process must
+  // survive that release, so `detach()` has to be honoured by `deinit`; without it
+  // ARC kills the server a moment after the app promises to keep it.
+  var detachedPID: pid_t = 0
+  if let sleeper = try? ChildProcess(executable: "/bin/sleep", arguments: ["sleep", "60"], environment: [:]) {
+    detachedPID = sleeper.pid
+    sleeper.detach()
+    checks.check(sleeper.isAlive, "a detached child is alive before it is released")
+    usleep(300_000)
+    checks.check(sleeper.isAlive, "a detached child stays alive while still referenced")
+  } else {
+    checks.check(false, "a sleep process could be spawned for the detach check")
+  }
+  usleep(300_000)
+  // `kill(pid, 0)` says yes for a zombie too, so liveness is asked the same way the
+  // handoff verifier asks it: `ps` knows a running process from a reaped one.
+  checks.check(
+    ExternalInstance.isAlive(ExternalInstance.Info(pid: detachedPID, command: "sleep")),
+    "a detached child survives being released"
+  )
+  _ = Darwin.kill(detachedPID, SIGKILL)
+
+  var attachedPID: pid_t = 0
+  if let sleeper = try? ChildProcess(executable: "/bin/sleep", arguments: ["sleep", "60"], environment: [:]) {
+    attachedPID = sleeper.pid
+  } else {
+    checks.check(false, "a sleep process could be spawned for the release check")
+  }
+  usleep(300_000)
+  checks.check(
+    !ExternalInstance.isAlive(ExternalInstance.Info(pid: attachedPID, command: "sleep")),
+    "an attached child is stopped when its owner is released"
+  )
+  _ = Darwin.kill(attachedPID, SIGKILL)
+
   // MARK: Copy — take over
 
   checks.equal(en.takeOver, "Take over", "en take over")
@@ -941,6 +979,432 @@ func runChecks() -> Int32 {
   )
 
   try? FileManager.default.removeItem(at: toolDir)
+
+  // MARK: - M3 · Launch paths (round 3, W1)
+
+  checks.equal(BarPreferences.normalizeWorkspacePath("   "), nil, "a blank workspace stays unset")
+  let homeExpanded = BarPreferences.normalizeWorkspacePath("~/Code/lab")
+  checks.check(
+    homeExpanded?.hasPrefix("/") == true && homeExpanded?.hasSuffix("/Code/lab") == true,
+    "a workspace path expands ~"
+  )
+  checks.equal(
+    BarPreferences.normalizeWorkspacePath("/tmp//a/../b"),
+    "/tmp/b",
+    "a workspace path collapses // and .."
+  )
+  checks.equal(
+    BarPreferences.normalizeWorkspacePath("dsh-lab"),
+    "dsh-lab",
+    "a relative workspace is kept for the error message"
+  )
+  checks.equal(BarPreferences.normalizeDshHome("  "), nil, "a blank DSH_HOME is unset")
+
+  let pathScratch = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+    .appendingPathComponent("dshbar-paths-\(UUID().uuidString)", isDirectory: true)
+  try? FileManager.default.createDirectory(at: pathScratch, withIntermediateDirectories: true)
+  let pathFile = pathScratch.appendingPathComponent("file.txt")
+  FileManager.default.createFile(atPath: pathFile.path, contents: Data("x".utf8))
+
+  let unsetPaths = LaunchTarget.resolve(BarPreferences())
+  checks.equal(unsetPaths.workingDirectory, nil, "an unset workspace sends no chdir")
+  checks.equal(unsetPaths.workspaceOrigin, .dshDefault, "an unset workspace is dsh's own")
+  checks.equal(unsetPaths.dshHome, nil, "follow-shell inherits DSH_HOME")
+  checks.equal(unsetPaths.dshHomeOrigin, .shell, "follow-shell says where it came from")
+  checks.check(unsetPaths.isRunnable, "the defaults are always runnable")
+  checks.check(unsetPaths.environmentOverlay.isEmpty, "the defaults overlay nothing")
+
+  let goodPaths = LaunchTarget.resolve(
+    BarPreferences(workspacePath: pathScratch.path, dshHomeMode: .override, dshHome: "~/dsh-state")
+  )
+  checks.equal(goodPaths.workingDirectory, pathScratch.path, "an existing workspace becomes the cwd")
+  checks.equal(goodPaths.workspaceOrigin, .preference, "a configured workspace says so")
+  checks.equal(
+    goodPaths.environmentOverlay["DSH_HOME"],
+    BarPreferences.collapse("~/dsh-state"),
+    "an override reaches the child as DSH_HOME"
+  )
+  checks.check(goodPaths.isRunnable, "two usable paths are runnable")
+
+  let missingPaths = LaunchTarget.resolve(BarPreferences(workspacePath: pathScratch.appendingPathComponent("nope").path))
+  checks.equal(
+    missingPaths.workspaceProblem,
+    .missing(path: pathScratch.appendingPathComponent("nope").path),
+    "a missing workspace is named"
+  )
+  checks.check(!missingPaths.isRunnable, "a missing workspace blocks the launch")
+
+  let filePaths = LaunchTarget.resolve(BarPreferences(workspacePath: pathFile.path))
+  checks.equal(
+    filePaths.workspaceProblem,
+    .notDirectory(path: pathFile.path),
+    "a file is not a working directory"
+  )
+
+  let relativePaths = LaunchTarget.resolve(BarPreferences(workspacePath: "dsh-lab"))
+  checks.equal(relativePaths.workspaceProblem, .relative(path: "dsh-lab"), "a relative path is rejected")
+  checks.check(
+    relativePaths.workspaceProblem?.isRelative == true,
+    "a relative path is reported as such"
+  )
+
+  let defaultHome = LaunchTarget.resolve(BarPreferences(dshHomeMode: .override))
+  checks.equal(defaultHome.dshHome, BarPreferences.collapse(BarPreferences.defaultDshHome), "a blank override means ~/.dsh")
+  checks.equal(defaultHome.dshHomeOrigin, .ownDefault, "a blank override is the app's default")
+
+  let badHome = LaunchTarget.resolve(
+    BarPreferences(dshHomeMode: .override, dshHome: pathFile.path)
+  )
+  checks.equal(
+    badHome.dshHomeProblem,
+    .notDirectory(path: pathFile.path),
+    "DSH_HOME pointing at a file is refused"
+  )
+  checks.equal(LaunchTarget.shortPath("/Users/x/Code", home: "/Users/x"), "~/Code", "a long path is abbreviated for the row")
+  checks.equal(LaunchTarget.shortPath("/opt/data", home: "/Users/x"), "/opt/data", "a path outside home stays absolute")
+
+  let richSuite = "dev.dsh.bar.check.rich.\(UUID().uuidString)"
+  if let domain = UserDefaults(suiteName: richSuite) {
+    let rich = BarPreferences(
+      binaryPath: "/x/dsh",
+      port: 3099,
+      profile: "tui",
+      workspacePath: "~/Code/lab",
+      dshHomeMode: .override,
+      dshHome: "~/state",
+      quitBehavior: .keepRunning,
+      hotKey: .controlOptionD
+    )
+    rich.save(to: domain)
+    checks.equal(BarPreferences.load(from: domain), rich, "M3 preferences round-trip")
+    checks.equal(BarPreferences.load(from: domain).workspacePath, BarPreferences.collapse("~/Code/lab"), "the workspace survives a relaunch")
+    checks.equal(BarPreferences.load(from: domain).dshHomeMode, .override, "the DSH_HOME mode survives")
+    checks.equal(BarPreferences.load(from: domain).quitBehavior, .keepRunning, "the quit behaviour survives")
+    checks.equal(BarPreferences.load(from: domain).hotKey, .controlOptionD, "the shortcut survives")
+
+    // A 0.3.0 defaults domain has none of the M3 keys: the upgrade must change nothing.
+    let legacy = "dev.dsh.bar.check.legacy.\(UUID().uuidString)"
+    if let old = UserDefaults(suiteName: legacy) {
+      old.set(3080, forKey: BarPreferences.Key.port)
+      old.set("web", forKey: BarPreferences.Key.profile)
+      let loaded = BarPreferences.load(from: old)
+      checks.equal(loaded.workspacePath, nil, "an old domain has no workspace")
+      checks.equal(loaded.dshHomeMode, .followShell, "an old domain follows the shell")
+      checks.equal(loaded.quitBehavior, .stopManaged, "an old domain stops on quit")
+      checks.equal(loaded.hotKey, .optionCommandD, "an old domain gets the default shortcut")
+      old.removePersistentDomain(forName: legacy)
+    }
+    domain.removePersistentDomain(forName: richSuite)
+  } else {
+    checks.check(false, "a throwaway defaults domain could not be created")
+  }
+
+  let workspaceDiagnosis = zh.diagnosis(HarnessFailure(kind: .workspaceMissing(path: "/tmp/gone")))
+  checks.check(workspaceDiagnosis.title.contains("工作目录"), "zh workspace diagnosis names the directory")
+  checks.check(workspaceDiagnosis.body.contains("/tmp/gone"), "zh workspace diagnosis quotes the path")
+  let homeDiagnosis = en.diagnosis(HarnessFailure(kind: .dshHomeMissing(path: "/tmp/file")))
+  checks.check(homeDiagnosis.title.contains("DSH_HOME"), "en DSH_HOME diagnosis names the variable")
+  checks.check(homeDiagnosis.body.contains("/tmp/file"), "en DSH_HOME diagnosis quotes the path")
+
+  checks.equal(HarnessFailure(kind: .portInUse(port: 1)).recovery, .freePort, "a port failure offers a free port")
+  checks.equal(HarnessFailure(kind: .workspaceMissing(path: "/x")).recovery, .defaultPaths, "a path failure offers the defaults")
+  checks.equal(HarnessFailure(kind: .nodeMissing).recovery, nil, "a node failure offers no invented repair")
+  checks.equal(
+    en.secondaryLabel(HarnessSnapshot(phase: .failed, failure: HarnessFailure(kind: .workspaceMissing(path: "/x")))),
+    "Use defaults",
+    "the path failure's second button says what it does"
+  )
+  checks.equal(
+    zh.secondaryLabel(HarnessSnapshot(phase: .failed, failure: HarnessFailure(kind: .dshHomeMissing(path: "/x")))),
+    "改回默认",
+    "the Chinese second button says what it does"
+  )
+  checks.equal(HarnessFailure(kind: .workspaceMissing(path: "/x")).path, "/x", "a failure can name its path")
+
+  // Only the port may change when a start adopts a real port (an OS-assigned one, or
+  // a take-over on another port). Rebuilding the struct instead silently reset the
+  // five fields 0.4.0 added, and saved that to disk.
+  let richPrefs = BarPreferences(
+    binaryPath: "/x/dsh",
+    port: 3080,
+    profile: "tui",
+    workspacePath: "~/Code/lab",
+    dshHomeMode: .override,
+    dshHome: "~/state",
+    quitBehavior: .keepRunning,
+    hotKey: .controlOptionD
+  )
+  let renumbered = richPrefs.replacing(port: 3099)
+  checks.equal(renumbered.port, 3099, "replacing the port takes the new port")
+  checks.equal(renumbered.profile, "tui", "replacing the port keeps the profile")
+  checks.equal(renumbered.binaryPath, "/x/dsh", "replacing the port keeps the binary")
+  checks.equal(renumbered.workspacePath, richPrefs.workspacePath, "replacing the port keeps the workspace")
+  checks.equal(renumbered.dshHomeMode, .override, "replacing the port keeps the DSH_HOME mode")
+  checks.equal(renumbered.dshHome, richPrefs.dshHome, "replacing the port keeps the DSH_HOME path")
+  checks.equal(renumbered.quitBehavior, .keepRunning, "replacing the port keeps the quit behaviour")
+  checks.equal(renumbered.hotKey, .controlOptionD, "replacing the port keeps the shortcut")
+  checks.equal(BarPreferences(port: 3080).replacing(port: 0).port, 0, "replacing accepts the auto port")
+  checks.equal(BarPreferences(port: 3080).replacing(port: 70_000).port, 3080, "replacing normalises an impossible port")
+
+  checks.equal(en.reading, "reading…", "en reading placeholder")
+  checks.equal(zh.reading, "读取中…", "zh reading placeholder")
+  checks.equal(zh.notAFolder("/tmp/f"), "不是文件夹：/tmp/f", "zh not-a-folder names the path")
+  checks.check(en.notAFolder("/tmp/f").contains("/tmp/f"), "en not-a-folder names the path")
+  checks.check(zh.noSuchFolder("/tmp/gone").contains("/tmp/gone"), "zh missing folder names the path")
+  checks.check(en.detectionMissing.contains("nvm"), "en detection note names the places searched")
+  checks.check(zh.detectionMissing.contains("Homebrew"), "zh detection note names the places searched")
+
+  let (workspaceFailedState, _) = HarnessReducer.reduce(
+    state,
+    .spawnFailed(HarnessFailure(kind: .workspaceMissing(path: "/tmp/gone"))),
+    language: .en
+  )
+  checks.equal(workspaceFailedState.snapshot.failure?.kind, .workspaceMissing(path: "/tmp/gone"), "a refused spawn keeps the path")
+  checks.equal(workspaceFailedState.snapshot.phase, HarnessPhase.failed, "a refused spawn fails the start")
+
+  try? FileManager.default.removeItem(at: pathScratch)
+
+  // MARK: - M3 · Environment report (W2)
+
+  checks.equal(EnvironmentReport.head(of: "/a:/b:/c:/d"), "/a:/b:/c", "the PATH head keeps three entries")
+  checks.equal(EnvironmentReport.head(of: "/a:/b"), "/a:/b", "a short PATH is not padded")
+  checks.equal(EnvironmentReport.head(of: ""), "", "an empty PATH has an empty head")
+  checks.equal(EnvironmentReport.head(of: "::/a::/b::/c"), "/a:/b:/c", "empty PATH entries are skipped")
+
+  let interactiveReport = EnvironmentReport.make(
+    values: ["PATH": "/nvm/bin:/usr/bin", "HOME": "/h", "DSH_HOME": "/h/.dsh"],
+    source: .interactiveShell,
+    durationMs: 412,
+    nodeVersion: "v24.22.2",
+    nodePath: "/nvm/bin/node"
+  )
+  checks.equal(interactiveReport.variableCount, 3, "the report counts the variables")
+  checks.equal(interactiveReport.pathHead, "/nvm/bin:/usr/bin", "the report keeps the PATH head")
+  checks.check(interactiveReport.hasNode, "the report knows it has node")
+  checks.check(!interactiveReport.isDegraded, "an interactive shell with node is healthy")
+  checks.equal(interactiveReport.failureNote, nil, "a healthy report has no note")
+  checks.equal(interactiveReport.durationMs, 412, "the report keeps the cost")
+
+  let processReport = EnvironmentReport.make(
+    values: ["PATH": "/usr/bin:/bin"],
+    source: .process,
+    durationMs: 3
+  )
+  checks.check(processReport.isDegraded, "the process environment is degraded")
+  checks.check(processReport.failureNote?.contains("no shell") == true, "a missing shell is named")
+  checks.check(processReport.failureNote?.contains("no node") == true, "a missing node is named too")
+  checks.equal(processReport.nodePath, nil, "a PATH without node reports no node")
+
+  let loginReport = EnvironmentReport.make(values: ["PATH": "/x"], source: .loginShell, durationMs: 20, nodePath: "/x/node")
+  checks.check(loginReport.failureNote?.contains(".zshrc") == true, "the login-shell report names the missing rc exports")
+
+  checks.equal(en.environmentSource(.interactiveShell), "interactive login shell", "en interactive source label")
+  checks.equal(zh.environmentSource(.loginShell), "登录 shell（未读 rc）", "zh login source label")
+  checks.equal(en.environmentSource(.process), "process environment", "en process source label")
+  checks.equal(en.environmentTiming(interactiveReport), "412 ms", "the timing is milliseconds")
+  checks.equal(en.environmentNodeMissing, "no node", "the node row has a missing state")
+  checks.check(zh.environmentFallbackNote.contains("~/.zshrc"), "zh fallback note points at ~/.zshrc")
+  checks.check(zh.environmentLoginShellNote.contains("node"), "zh login-shell note explains the node risk")
+  checks.equal(en.reread, "Read again", "en reread button")
+
+  // MARK: - M3 · Handoff (W3)
+
+  let handoffSuite = "dev.dsh.bar.check.handoff.\(UUID().uuidString)"
+  if let domain = UserDefaults(suiteName: handoffSuite) {
+    checks.equal(HandoffStore.load(from: domain), nil, "nothing is remembered before a handoff")
+    let record = HandoffRecord(pid: 4326, port: 3099, startedAt: Date(timeIntervalSince1970: 1_700_000_000), launchURL: "http://127.0.0.1:3099/?token=x")
+    HandoffStore.save(record, to: domain)
+    checks.equal(HandoffStore.load(from: domain), record, "a handoff record survives a relaunch")
+    checks.equal(HandoffStore.load(from: domain)?.pid, 4326, "the record keeps the pid")
+    checks.equal(HandoffStore.load(from: domain)?.port, 3099, "the record keeps the port")
+
+    checks.equal(
+      HandoffVerifier.verify(nil, inspection: HandoffInspection(pidAlive: true, command: "node dsh", portServesDsh: true)),
+      .noRecord,
+      "no record means no verdict"
+    )
+    checks.equal(
+      HandoffVerifier.verify(record, inspection: HandoffInspection(pidAlive: false, command: nil, portServesDsh: false)),
+      .pidGone,
+      "a dead pid drops the claim"
+    )
+    checks.equal(
+      HandoffVerifier.verify(
+        record,
+        inspection: HandoffInspection(pidAlive: true, command: "/usr/bin/python3 -m http.server", portServesDsh: true)
+      ),
+      .notDsh,
+      "a pid that is not a dsh is refused"
+    )
+    checks.equal(
+      HandoffVerifier.verify(
+        record,
+        inspection: HandoffInspection(pidAlive: true, command: "node /Users/x/dsh/lib/bin.js web", portServesDsh: false)
+      ),
+      .portMoved,
+      "a dsh on another port is not this handoff"
+    )
+    checks.equal(
+      HandoffVerifier.verify(
+        record,
+        inspection: HandoffInspection(pidAlive: true, command: "node /Users/x/dsh/lib/bin.js web", group: 4326, portServesDsh: true)
+      ),
+      .valid,
+      "a live dsh on the recorded port is the handoff"
+    )
+    checks.check(HandoffVerdict.valid.isUsable, "a valid verdict is usable")
+    checks.check(!HandoffVerdict.pidGone.isUsable, "a dead pid is not usable")
+
+    HandoffStore.clear(from: domain)
+    checks.equal(HandoffStore.load(from: domain), nil, "clearing forgets the handoff")
+    domain.removePersistentDomain(forName: handoffSuite)
+  } else {
+    checks.check(false, "a throwaway defaults domain could not be created")
+  }
+
+  let (handoffState, handoffCommands) = HarnessReducer.reduce(
+    HarnessState(),
+    .observedHandoff(port: 3099),
+    language: .en
+  )
+  checks.equal(handoffState.snapshot.phase, .listening, "a handoff server listens")
+  checks.equal(handoffState.snapshot.owner, .external, "a handoff server is external")
+  checks.check(handoffState.snapshot.handoff, "a handoff server is marked as ours-once")
+  checks.check(!handoffState.snapshot.hasLaunchURL, "a handoff server has no token")
+  checks.equal(handoffCommands, [.stopUptime], "observing a handoff stops the idle clock")
+
+  let (plainExternal, _) = HarnessReducer.reduce(HarnessState(), .observedExternal(port: 3099), language: .en)
+  checks.check(!plainExternal.snapshot.handoff, "a terminal server carries no handoff mark")
+  checks.equal(
+    en.readoutSide(handoffState.snapshot),
+    "started by dsh bar",
+    "the readout names the handoff"
+  )
+  checks.equal(en.readoutSide(plainExternal.snapshot), "started in a terminal", "a terminal server keeps its own note")
+  checks.check(zh.handoffNote.contains("接管"), "zh handoff note offers a way out")
+  checks.check(en.handoffNote.contains("token"), "en handoff note explains the missing token")
+
+  var staleHandoff = HarnessState()
+  staleHandoff.snapshot.handoff = true
+  let (afterStart, _) = HarnessReducer.reduce(staleHandoff, .start(port: 3099, profile: "web"), language: .en)
+  checks.check(!afterStart.snapshot.handoff, "starting a new server clears the mark")
+  let (afterGone, _) = HarnessReducer.reduce(handoffState, .observedFree(port: 3099), language: .en)
+  checks.check(!afterGone.snapshot.handoff, "a vanished handoff clears the mark")
+
+  checks.equal(QuitBehavior.label(.stopManaged, language: .en), "Stop the server", "en stop-on-quit label")
+  checks.equal(QuitBehavior.label(.keepRunning, language: .zhHans), "保持运行", "zh keep-running label")
+  checks.equal(QuitBehavior.label(.ask, language: .en), "Ask every time", "en ask-on-quit label")
+  checks.equal(QuitBehavior.allCases.count, 3, "three quit behaviours")
+
+  // MARK: - M3 · Single instance & shortcut (W4)
+
+  checks.equal(
+    SingleInstance.decision(running: [], myPID: 10, myBundleIdentifier: "dev.dsh.bar"),
+    .runMyself,
+    "the first launch runs"
+  )
+  checks.equal(
+    SingleInstance.decision(
+      running: [
+        SingleInstance.Resident(pid: 10, bundleIdentifier: "dev.dsh.bar"),
+        SingleInstance.Resident(pid: 11, bundleIdentifier: "dev.dsh.bar"),
+      ],
+      myPID: 11,
+      myBundleIdentifier: "dev.dsh.bar"
+    ),
+    .yield(to: 10),
+    "a second launch defers to the first"
+  )
+  checks.equal(
+    SingleInstance.decision(
+      running: [SingleInstance.Resident(pid: 9, bundleIdentifier: "com.other.app")],
+      myPID: 10,
+      myBundleIdentifier: "dev.dsh.bar"
+    ),
+    .runMyself,
+    "another app with a different identifier is not a copy"
+  )
+  checks.equal(
+    SingleInstance.decision(
+      running: [SingleInstance.Resident(pid: 9, bundleIdentifier: "dev.dsh.bar")],
+      myPID: 10,
+      myBundleIdentifier: nil
+    ),
+    .runMyself,
+    "an unbundled build always runs"
+  )
+  checks.equal(
+    SingleInstance.decision(
+      running: [
+        SingleInstance.Resident(pid: 12, bundleIdentifier: "dev.dsh.bar"),
+        SingleInstance.Resident(pid: 11, bundleIdentifier: "dev.dsh.bar"),
+      ],
+      myPID: 10,
+      myBundleIdentifier: "dev.dsh.bar"
+    ),
+    .yield(to: 11),
+    "the oldest copy wins"
+  )
+
+  checks.equal(HotKeyChoice.default, .optionCommandD, "the default shortcut")
+  checks.equal(HotKeyChoice.keyCodeD, 2, "D is virtual key 2")
+  checks.equal(HotKeyChoice.optionCommandD.keyCode, 2, "option-command uses D")
+  checks.equal(HotKeyChoice.optionCommandD.modifiers, 2304, "option-command is cmdKey|optionKey")
+  checks.equal(HotKeyChoice.controlOptionD.modifiers, 6144, "control-option is controlKey|optionKey")
+  checks.equal(HotKeyChoice.off.keyCode, nil, "off has no key")
+  checks.equal(HotKeyChoice.off.modifiers, 0, "off has no modifiers")
+  checks.check(!HotKeyChoice.off.isEnabled, "off is disabled")
+  checks.check(HotKeyChoice.controlOptionD.isEnabled, "a chord is enabled")
+  checks.equal(HotKeyChoice.optionCommandD.label, "⌥⌘D", "the option-command label")
+  checks.equal(HotKeyChoice.controlOptionD.label, "⌃⌥D", "the control-option label")
+  checks.equal(HotKeyChoice.off.label(language: .zhHans), "关闭", "zh off label")
+  checks.equal(HotKeyChoice.controlOptionD.label(language: .en), "⌃⌥D", "the label ignores language while on")
+  checks.check(HotKeyStatus.active.isActive, "an active chip is active")
+  checks.check(!HotKeyStatus.taken.isActive, "a taken chord is not active")
+  checks.check(zh.shortcutTaken.contains("占用"), "zh taken note says the chord is taken")
+
+  // MARK: - M3 · Launch at login (W5)
+
+  checks.equal(
+    LaunchAtLogin.map(raw: 1, bundleIdentifier: "dev.dsh.bar", isSignedStably: true, reasonWhenUnavailable: nil),
+    LoginItemStatus.enabled,
+    "a registered login item is on"
+  )
+  checks.equal(
+    LaunchAtLogin.map(raw: 2, bundleIdentifier: "dev.dsh.bar", isSignedStably: true, reasonWhenUnavailable: nil),
+    LoginItemStatus.requiresApproval,
+    "a pending login item asks for approval"
+  )
+  checks.equal(
+    LaunchAtLogin.map(raw: 0, bundleIdentifier: "dev.dsh.bar", isSignedStably: true, reasonWhenUnavailable: nil),
+    LoginItemStatus.notRegistered,
+    "an unregistered login item is off"
+  )
+  checks.equal(
+    LaunchAtLogin.map(raw: 3, bundleIdentifier: "dev.dsh.bar", isSignedStably: true, reasonWhenUnavailable: nil),
+    LoginItemStatus.notRegistered,
+    "a not-found login item is off"
+  )
+  if case .unavailable = LaunchAtLogin.map(raw: 1, bundleIdentifier: "dev.dsh.bar", isSignedStably: false, reasonWhenUnavailable: nil) {
+    checks.check(true, "an ad-hoc signature cannot hold a login item")
+  } else {
+    checks.check(false, "an ad-hoc signature cannot hold a login item")
+  }
+  if case .unavailable = LaunchAtLogin.map(raw: 1, bundleIdentifier: nil, isSignedStably: true, reasonWhenUnavailable: "needs a bundle") {
+    checks.check(true, "an unbundled build cannot register a login item")
+  } else {
+    checks.check(false, "an unbundled build cannot register a login item")
+  }
+  checks.check(LoginItemStatus.enabled.isOn, "enabled is on")
+  checks.check(!LoginItemStatus.notRegistered.isOn, "unregistered is not on")
+  checks.check(LoginItemStatus.requiresApproval.isOffered, "a pending item is still offered")
+  checks.check(!LoginItemStatus.unavailable(reason: "x").isOffered, "an unavailable item is not offered")
+  checks.check(LaunchAtLogin.deepLink.contains("LoginItems"), "the deep link opens Login Items")
+  checks.equal(en.loginItemState(.enabled), "on", "en login item on")
+  checks.equal(zh.loginItemState(.requiresApproval), "等待系统批准", "zh login item pending")
+  checks.equal(en.loginItemState(.notRegistered), "off", "en login item off")
+  checks.check(zh.loginItemUnsigned.contains("签名"), "zh unsigned note explains the signature")
+  checks.equal(en.openLoginItems, "Open Login Items…", "en login items button")
 
   return checks.report()
 }

@@ -129,6 +129,23 @@ enum Smoke {
       "the token URL is accepted (\(authenticated.status))"
     )
 
+    // The "quit and keep it running" claim, checked against the real process the
+    // same way the next launch checks it: pid alive, command line is a dsh, port
+    // answers with the fence. No record is written here — this is the verifier.
+    let record = HandoffRecord(
+      pid: child.pid,
+      port: launch.port,
+      startedAt: Date(),
+      launchURL: launch.url
+    )
+    let liveInspection = HandoffVerifier.inspect(record)
+    check(liveInspection.pidAlive, "the handoff record's pid is alive")
+    check(liveInspection.portServesDsh, "the handoff record's port answers as a dsh")
+    check(
+      HandoffVerifier.verify(record, inspection: liveInspection) == .valid,
+      "a live handoff verifies as valid"
+    )
+
     child.terminate()
     let stopDeadline = Date().addingTimeInterval(5)
     while exitCode == nil, Date() < stopDeadline {
@@ -150,6 +167,10 @@ enum Smoke {
       RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
     }
     check(freed, "port \(requested) is free again")
+    check(
+      !HandoffVerifier.verify(record, inspection: HandoffVerifier.inspect(record)).isUsable,
+      "a handoff pointing at a stopped server is not usable"
+    )
 
     if failures.isEmpty {
       print("\n✓ smoke passed")

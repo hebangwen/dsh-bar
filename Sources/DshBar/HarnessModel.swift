@@ -20,6 +20,13 @@ protocol HarnessBackend: AnyObject {
   func refreshExternal()
   func preview(_ scene: DemoScene)
   func shutdown()
+  /// The login shell's environment, as last resolved. Nil until the first answer.
+  var environmentReport: EnvironmentReport? { get }
+  var onEnvironment: ((EnvironmentReport?) -> Void)? { get set }
+  /// Ask the shell again, ignoring the cache. The settings button.
+  func rereadEnvironment()
+  /// Leave a managed server running across this quit, with a record for next time.
+  func prepareHandoff()
 }
 
 enum AppearanceOverride: String, CaseIterable, Identifiable {
@@ -69,6 +76,13 @@ final class HarnessModel: ObservableObject {
   /// whether a bookmark is remembering that grant.
   @Published private(set) var documentsFolder: FolderAccessSnapshot
   @Published private(set) var folderError: String?
+  /// What the login shell last said, for the settings window's Environment block.
+  @Published private(set) var environmentReport: EnvironmentReport?
+  /// Whether dsh bar starts at login, as the system reports it right now.
+  @Published private(set) var launchAtLogin: LoginItemStatus = .notRegistered
+  @Published private(set) var loginItemError: String?
+  /// What the last attempt at registering the global shortcut concluded.
+  @Published private(set) var hotKeyStatus: HotKeyStatus = .off
   @Published var appearance: AppearanceOverride = .system {
     didSet { applyAppearance() }
   }
@@ -118,6 +132,12 @@ final class HarnessModel: ObservableObject {
       self.adoptPort()
       self.didSettle()
     }
+    backend.onEnvironment = { [weak self] report in
+      self?.environmentReport = report
+    }
+    environmentReport = backend.environmentReport
+    // `LaunchAtLogin.status()` shells out to `codesign`, so it is asked when the
+    // settings window opens, not on every app launch.
     applyAppearance()
   }
 
@@ -267,7 +287,7 @@ final class HarnessModel: ObservableObject {
     panel.nameFieldStringValue = target.lastPathComponent
     panel.message = copy.grantMessage
     panel.prompt = copy.grantPrompt
-    NSApp.activate(ignoringOtherApps: true)
+    NSApp.activate()
     guard panel.runModal() == .OK, let url = panel.url else {
       // Cancelled: nothing changed, and a probe here would only ask the system again.
       refreshDocumentsAccess(probe: false)
@@ -311,6 +331,10 @@ final class HarnessModel: ObservableObject {
   /// when the grant is still missing.
   func prepareDocumentsForStart() {
     guard !demoMode else { return }
+    // A scripted launch cannot click an open panel. The integration hook skips the
+    // ask and lets the spawn report the missing grant in the log, which is exactly
+    // what the panel would say anyway.
+    guard ProcessInfo.processInfo.environment["DSHBAR_SKIP_FOLDER_GRANT"] != "1" else { return }
     documentsAccess.startAccessing()
     if documentsAccess.hasBookmark {
       // A stored bookmark may be stale or revoked; that probe is safe (the grant is
@@ -327,6 +351,110 @@ final class HarnessModel: ObservableObject {
     apply(next)
   }
 
+  // MARK: - Launch paths & quit policy
+
+  /// The two paths a start would use, resolved against the file system. The
+  /// settings rows read this so what they show is what a launch would do.
+  var launchTarget: LaunchTarget { LaunchTarget.resolve(preferences) }
+
+  func update(workspacePath: String?) {
+    var next = preferences
+    next.workspacePath = BarPreferences.normalizeWorkspacePath(workspacePath)
+    apply(next)
+  }
+
+  func update(dshHomeMode: DshHomeMode) {
+    var next = preferences
+    next.dshHomeMode = dshHomeMode
+    apply(next)
+  }
+
+  func update(dshHome: String?) {
+    var next = preferences
+    next.dshHome = BarPreferences.normalizeDshHome(dshHome)
+    apply(next)
+  }
+
+  /// The panel's "Use defaults" action: forget both configured paths.
+  func resetLaunchPaths() {
+    var next = preferences
+    next.workspacePath = nil
+    next.dshHomeMode = .followShell
+    next.dshHome = nil
+    apply(next)
+  }
+
+  func update(quitBehavior: QuitBehavior) {
+    var next = preferences
+    next.quitBehavior = quitBehavior
+    apply(next)
+  }
+
+  /// The registrar lives in the app delegate (it owns the Carbon handle), so the
+  /// model forwards the choice instead of importing it.
+  var onHotKeyChange: ((HotKeyChoice) -> Void)?
+
+  func update(hotKey: HotKeyChoice) {
+    var next = preferences
+    next.hotKey = hotKey
+    apply(next)
+    onHotKeyChange?(hotKey)
+  }
+
+  func recordHotKeyStatus(_ status: HotKeyStatus) {
+    hotKeyStatus = status
+  }
+
+  /// `DSHBAR_QUIT_BEHAVIOR` exists for the integration pass: a menu bar app's quit
+  /// dialog is not clickable from a script, but the behaviour behind it must still
+  /// be exercised.
+  var effectiveQuitBehavior: QuitBehavior {
+    if let raw = ProcessInfo.processInfo.environment["DSHBAR_QUIT_BEHAVIOR"],
+       let forced = QuitBehavior(rawValue: raw) {
+      return forced
+    }
+    return preferences.quitBehavior
+  }
+
+  // MARK: - Environment
+
+  func rereadEnvironment() {
+    backend.rereadEnvironment()
+  }
+
+  // MARK: - Login item
+
+  func refreshLaunchAtLogin() {
+    launchAtLogin = localize(LaunchAtLogin.status())
+    loginItemError = nil
+  }
+
+  /// The two blockers the app names itself are translated here; a system error is
+  /// already in the user's language and is passed through untouched.
+  private func localize(_ status: LoginItemStatus) -> LoginItemStatus {
+    guard case let .unavailable(reason) = status else { return status }
+    switch reason {
+    case LaunchAtLogin.unstableReason: return .unavailable(reason: copy.loginItemUnsigned)
+    case LaunchAtLogin.unbundledReason: return .unavailable(reason: copy.loginItemUnavailableHere)
+    default: return status
+    }
+  }
+
+  func setLaunchAtLogin(_ enabled: Bool) {
+    let status = localize(LaunchAtLogin.set(enabled: enabled))
+    launchAtLogin = status
+    if case let .unavailable(reason) = status {
+      loginItemError = reason
+    } else {
+      loginItemError = nil
+    }
+  }
+
+  func openLoginItemsSettings() {
+    guard let url = URL(string: LaunchAtLogin.deepLink) else { return }
+    NSWorkspace.shared.open(url)
+  }
+
   func chooseBinary(_ path: String?) {
     var next = preferences
     next.binaryPath = BarPreferences.normalizeBinaryPath(path)
@@ -337,7 +465,11 @@ final class HarnessModel: ObservableObject {
   private func apply(_ next: BarPreferences) {
     preferences = next
     next.save()
-    snapshot.port = next.port
+    // While a server is listening its port is a fact, not a preference: showing the
+    // new number before a restart would make the panel disagree with the process.
+    if snapshot.phase != .listening {
+      snapshot.port = next.port
+    }
     snapshot.profile = next.profile
     // The backend owns its own copy; without this a newly chosen dsh path would
     // be ignored until the next launch.
@@ -411,6 +543,14 @@ final class HarnessModel: ObservableObject {
     documentsAccess.stopAccessing()
   }
 
+  /// Quit behaviour "keep it running": leave the process alone and record enough
+  /// for the next launch to recognise it. The panel is not the owner any more, so
+  /// the folder scope goes with the process.
+  func keepRunning() {
+    backend.prepareHandoff()
+    documentsAccess.stopAccessing()
+  }
+
   private func clearStopConfirmation() {
     confirmReset?.cancel()
     stopIsConfirming = false
@@ -429,10 +569,12 @@ final class HarnessModel: ObservableObject {
   private func adoptPort() {
     guard snapshot.phase == .listening, snapshot.owner == .dshBar else { return }
     guard snapshot.port != preferences.port else { return }
-    var next = preferences
-    next.port = snapshot.port
+    let next = preferences.replacing(port: snapshot.port)
     preferences = next
     next.save()
+    // The controller keeps its own copy for the next spawn; leaving it stale is how
+    // a "take over on port 3099" ends up starting on 3080.
+    backend.update(next)
   }
 
   private func didSettle() {
@@ -443,11 +585,7 @@ final class HarnessModel: ObservableObject {
       let port = restartPort ?? preferences.port
       restartPort = nil
       if port != preferences.port {
-        apply(BarPreferences(
-          binaryPath: preferences.binaryPath,
-          port: port,
-          profile: preferences.profile
-        ))
+        apply(preferences.replacing(port: port))
       }
       backend.start(port: port, profile: preferences.profile)
     case .failed:

@@ -13,7 +13,9 @@ final class LiveBackend: HarnessBackend {
   private(set) var launchURL: String?
 
   private let language: UILanguage
-  private let writer = LogFileWriter()
+  /// `LogFileWriter` serialises every append behind its own lock, so the shell and
+  /// report work can write from a background queue while the main actor reads.
+  nonisolated private let writer = LogFileWriter()
   private let probeQueue = DispatchQueue(label: "dev.dsh.bar.probe", qos: .userInitiated)
 
   private var preferences: BarPreferences
@@ -25,6 +27,8 @@ final class LiveBackend: HarnessBackend {
   private var environmentDate: Date?
   private var environmentSource: LoginShellEnvironment.Source?
   private var isWarmingEnvironment = false
+  private(set) var environmentReport: EnvironmentReport?
+  var onEnvironment: ((EnvironmentReport?) -> Void)?
 
   private var watchTimer: Timer?
   private var readyTimer: Timer?
@@ -47,6 +51,7 @@ final class LiveBackend: HarnessBackend {
     // The first Start should not pay for a shell launch, and a hung rc file must
     // not be able to block the click.
     warmEnvironment()
+    pruneHandoffIfGone()
   }
 
   // MARK: - HarnessBackend
@@ -118,19 +123,40 @@ final class LiveBackend: HarnessBackend {
     guard (1...65535).contains(port) else { return }
     probeQueue.async { [weak self] in
       let portState = PortProbe.probe(port: port)
+      // The process table and the port are both read here, off the main thread: the
+      // handoff question is "is the pid in my note still the dsh on this port?".
+      var verdict: HandoffVerdict = .noRecord
+      if portState == .dsh, let record = HandoffStore.load(), record.port == port {
+        let info = ExternalInstance.describe(pid: record.pid)
+        let inspection = HandoffInspection(
+          pidAlive: info.map { ExternalInstance.isAlive($0) } ?? false,
+          command: info?.command,
+          group: info?.group,
+          portServesDsh: true
+        )
+        verdict = HandoffVerifier.verify(record, inspection: inspection)
+        if !verdict.isUsable {
+          // A claim that no longer matches the process table is worth forgetting:
+          // keeping it would make every probe re-read `ps` for a pid that is gone.
+          HandoffStore.clear()
+          self?.writer.note("handoff record dropped: \(verdict)")
+        }
+      } else if portState == .free, let record = HandoffStore.load(), record.port == port {
+        HandoffStore.clear()
+      }
       DispatchQueue.main.async {
         MainActor.assumeIsolated {
-          self?.observe(portState, port: port)
+          self?.observe(portState, port: port, handoff: verdict)
         }
       }
     }
   }
 
-  private func observe(_ portState: PortState, port: Int) {
+  private func observe(_ portState: PortState, port: Int, handoff: HandoffVerdict = .noRecord) {
     guard port == state.snapshot.port else { return }
     switch (state.snapshot.phase, portState) {
     case (.stopped, .dsh):
-      dispatch(.observedExternal(port: port))
+      dispatch(handoff.isUsable ? .observedHandoff(port: port) : .observedExternal(port: port))
     case (.listening, .free) where state.snapshot.owner == .external:
       dispatch(.observedFree(port: port))
     default:
@@ -156,15 +182,7 @@ final class LiveBackend: HarnessBackend {
   /// Called when the app is quitting. SIGTERM first, then a short wait, because a
   /// killed dsh leaves a session store that the next boot has to repair.
   func shutdown() {
-    watchTimer?.invalidate()
-    readyTimer?.invalidate()
-    stopTimer?.invalidate()
-    killTimer?.invalidate()
-    uptimeTimer?.invalidate()
-    readyTimer = nil
-    stopTimer = nil
-    killTimer = nil
-    uptimeTimer = nil
+    invalidateTimers()
     guard let child else { return }
     child.terminate()
     let deadline = Date().addingTimeInterval(0.8)
@@ -263,6 +281,31 @@ final class LiveBackend: HarnessBackend {
       arguments.append(contentsOf: ["--port", "\(port)"])
     }
 
+    // The two launch paths are checked before anything is spawned: `posix_spawn`
+    // would otherwise fail with a chdir error that reads like a broken binary.
+    let target = LaunchTarget.resolve(preferences)
+    if let problem = target.workspaceProblem {
+      failStart(
+        HarnessFailure(kind: .workspaceMissing(path: problem.path), detail: describe(problem)),
+        note: "not spawning: the working directory is unusable — \(problem.path)"
+      )
+      return
+    }
+    if let problem = target.dshHomeProblem {
+      failStart(
+        HarnessFailure(kind: .dshHomeMissing(path: problem.path), detail: describe(problem)),
+        note: "not spawning: DSH_HOME is unusable — \(problem.path)"
+      )
+      return
+    }
+    if let dshHome = target.dshHome, !ensureDirectory(dshHome) {
+      failStart(
+        HarnessFailure(kind: .dshHomeMissing(path: dshHome), detail: "could not create the directory"),
+        note: "not spawning: could not create DSH_HOME — \(dshHome)"
+      )
+      return
+    }
+
     // The child inherits this process's TCC identity, so the grant has to be held
     // here — and re-acquired per spawn, because a bookmark resolved at launch can
     // be dropped by a TCC reset in between. When it is missing the start would fail
@@ -297,6 +340,18 @@ final class LiveBackend: HarnessBackend {
       forExecutable: detection.path,
       environment: values
     )
+    for (key, value) in target.environmentOverlay {
+      values[key] = value
+    }
+    let cwdNote = target.workingDirectory.map { LaunchTarget.shortPath($0) } ?? "dsh default"
+    let homeNote: String
+    switch (target.dshHome, target.dshHomeOrigin) {
+    case (nil, _): homeNote = "from the login shell"
+    case (let path?, .ownDefault): homeNote = "\(LaunchTarget.shortPath(path)) (default)"
+    case (let path?, _): homeNote = LaunchTarget.shortPath(path)
+    }
+    writer.note("launch paths: cwd \(cwdNote) · DSH_HOME \(homeNote)")
+    append(line: "dsh bar: cwd \(cwdNote) · DSH_HOME \(homeNote)", stream: .err)
     let node = LoginShellEnvironment.nodePath(onPath: values["PATH"])
     let head = (values["PATH"] ?? "").split(separator: ":").prefix(3).joined(separator: ":")
     writer.note("spawn env: \(environmentSource?.rawValue ?? "unknown") · PATH head \(head) · node \(node ?? "missing")")
@@ -315,7 +370,8 @@ final class LiveBackend: HarnessBackend {
       let child = try ChildProcess(
         executable: detection.path,
         arguments: arguments,
-        environment: values
+        environment: values,
+        workingDirectory: target.workingDirectory
       )
       self.child = child
       writer.note("spawned \(detection.path) \(arguments.joined(separator: " ")) pid=\(child.pid)")
@@ -407,6 +463,7 @@ final class LiveBackend: HarnessBackend {
           self.writer.note(detail)
           self.append(line: detail, stream: .err)
           if stopped {
+            HandoffStore.clear()
             self.dispatch(.exited(code: 0, signal: nil))
           } else {
             // The port is still held. Reporting `.exited` here would claim a clean
@@ -440,6 +497,24 @@ final class LiveBackend: HarnessBackend {
 
   // MARK: - Environment
 
+  /// The one place a shell is asked. Everything else reads the cache or the report.
+  nonisolated private func resolveEnvironmentNow(log: Bool) -> (values: [String: String], source: LoginShellEnvironment.Source, durationMs: Int) {
+    let started = Date()
+    let resolved = LoginShellEnvironment.resolve()
+    let duration = Int((Date().timeIntervalSince(started) * 1000).rounded())
+    if log {
+      switch resolved.source {
+      case .process:
+        writer.note("no shell answered; falling back to the process environment (PATH: \(resolved.values["PATH"] ?? "empty")), \(duration) ms")
+      case .interactiveShell:
+        writer.note("environment from the interactive login shell, \(duration) ms")
+      case .loginShell:
+        writer.note("environment from the login shell (no rc), \(duration) ms; ~/.zshrc exports are missing")
+      }
+    }
+    return (resolved.values, resolved.source, duration)
+  }
+
   /// Asks the interactive login shell once, off the main thread. `zsh -lic` is the
   /// only shell that reads `~/.zshrc`, which is where nvm puts `node` — a
   /// GUI-launched app inherits neither.
@@ -447,17 +522,91 @@ final class LiveBackend: HarnessBackend {
     guard !isWarmingEnvironment else { return }
     isWarmingEnvironment = true
     probeQueue.async { [weak self] in
-      let resolved = LoginShellEnvironment.resolve()
+      guard let self else { return }
+      let resolved = self.resolveEnvironmentNow(log: false)
       DispatchQueue.main.async {
         MainActor.assumeIsolated {
-          guard let self else { return }
           self.isWarmingEnvironment = false
           self.environment = resolved.values
           self.environmentSource = resolved.source
           self.environmentDate = Date()
+          self.publishEnvironmentReport(
+            values: resolved.values,
+            source: resolved.source,
+            durationMs: resolved.durationMs
+          )
         }
       }
     }
+  }
+
+  /// The settings "Read again" button: ignore the 60-second cache and ask the shell
+  /// now. Runs off the main thread so a slow `.zshrc` never freezes the window.
+  func rereadEnvironment() {
+    guard !isWarmingEnvironment else { return }
+    isWarmingEnvironment = true
+    probeQueue.async { [weak self] in
+      guard let self else { return }
+      let resolved = self.resolveEnvironmentNow(log: true)
+      DispatchQueue.main.async {
+        MainActor.assumeIsolated {
+          self.isWarmingEnvironment = false
+          self.environment = resolved.values
+          self.environmentSource = resolved.source
+          self.environmentDate = Date()
+          self.publishEnvironmentReport(
+            values: resolved.values,
+            source: resolved.source,
+            durationMs: resolved.durationMs
+          )
+        }
+      }
+    }
+  }
+
+  /// Publish the report, then fill in the node version when the shell's node can be
+  /// asked. The version is decoration; the report is useful without it.
+  private func publishEnvironmentReport(
+    values: [String: String],
+    source: LoginShellEnvironment.Source,
+    durationMs: Int
+  ) {
+    let report = EnvironmentReport.make(values: values, source: source, durationMs: durationMs)
+    environmentReport = report
+    onEnvironment?(report)
+    guard let node = report.nodePath else { return }
+    probeQueue.async { [weak self] in
+      let version = Self.nodeVersion(at: node)
+      guard let version else { return }
+      DispatchQueue.main.async {
+        MainActor.assumeIsolated {
+          guard let self, var current = self.environmentReport, current.source == source else { return }
+          current.nodeVersion = version
+          self.environmentReport = current
+          self.onEnvironment?(current)
+        }
+      }
+    }
+  }
+
+  nonisolated private static func nodeVersion(at path: String) -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: path)
+    process.arguments = ["--version"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    do {
+      try process.run()
+    } catch {
+      return nil
+    }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { return nil }
+    let text = String(data: data, encoding: .utf8)?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    return (text?.isEmpty ?? true) ? nil : text
   }
 
   /// For the locator: whatever is cached, else the app's own environment, with a
@@ -474,20 +623,113 @@ final class LiveBackend: HarnessBackend {
     if let environment, let environmentDate, Date().timeIntervalSince(environmentDate) < 60 {
       return environment
     }
-    let resolved = LoginShellEnvironment.resolve()
+    let resolved = resolveEnvironmentNow(log: true)
     environment = resolved.values
     environmentSource = resolved.source
     environmentDate = Date()
-    switch resolved.source {
-    case .process:
-      writer.note("no shell answered; falling back to the process environment (PATH: \(resolved.values["PATH"] ?? "empty"))")
-    case .interactiveShell:
-      writer.note("environment from the interactive login shell")
-    case .loginShell:
-      writer.note("environment from the login shell (no rc); ~/.zshrc exports are missing")
+    if let source = environmentSource {
+      publishEnvironmentReport(values: resolved.values, source: source, durationMs: resolved.durationMs)
     }
     return resolved.values
   }
+
+  // MARK: - Launch paths
+
+  /// One sentence for the panel's diagnosis block.
+  private func describe(_ problem: LaunchPathProblem) -> String {
+    switch problem {
+    case .relative: return "relative path"
+    case .notDirectory: return "not a folder"
+    case .missing: return "no such folder"
+    }
+  }
+
+  /// `mkdir -p` for DSH_HOME: dsh creates its own state directory on first boot, and
+  /// the app passes an explicit path only because the user asked for one.
+  private func ensureDirectory(_ path: String) -> Bool {
+    var isDirectory: ObjCBool = false
+    if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) {
+      return isDirectory.boolValue
+    }
+    do {
+      try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+      return true
+    } catch {
+      writer.note("mkdir \(path) failed: \(error)")
+      return false
+    }
+  }
+
+  /// Refuse the launch before `posix_spawn` can turn a bad path into a confusing
+  /// binary error.
+  private func failStart(_ failure: HarnessFailure, note: String) {
+    writer.note(note)
+    append(line: "dsh bar: \(note)", stream: .err)
+    DispatchQueue.main.async { [weak self] in
+      MainActor.assumeIsolated {
+        self?.dispatch(.spawnFailed(failure))
+      }
+    }
+  }
+
+  // MARK: - Handoff
+
+  /// A record from a quit that kept the server alive. Only the part that can be
+  /// decided without touching the process table is done here: the rest happens when
+  /// the port watcher actually sees a dsh.
+  private func pruneHandoffIfGone() {
+    guard let record = HandoffStore.load() else { return }
+    probeQueue.async { [weak self] in
+      let state = PortProbe.probe(port: record.port)
+      guard state == .free else { return }
+      DispatchQueue.main.async {
+        MainActor.assumeIsolated {
+          // Nothing on that port: the kept server is gone, so the note would be a lie.
+          HandoffStore.clear()
+          self?.writer.note("handoff record for port \(record.port) is stale; dropped")
+        }
+      }
+    }
+  }
+
+  /// Keep the running server alive across this quit, and write down enough for the
+  /// next launch to recognise it. Never signals anything.
+  func prepareHandoff() {
+    guard let child, state.snapshot.phase == .listening, state.snapshot.owner == .dshBar else {
+      writer.note("handoff skipped: no managed server is listening")
+      return
+    }
+    let record = HandoffRecord(
+      pid: child.pid,
+      port: state.snapshot.port,
+      startedAt: state.startedAt ?? Date(),
+      launchURL: launchURL
+    )
+    HandoffStore.save(record)
+    writer.note("handoff: keeping pid \(record.pid) on port \(record.port) after quit")
+    // `detach()` first: dropping the last reference to a ChildProcess sends SIGTERM,
+    // which would turn "keep it running" into "stop it a moment later".
+    child.detach()
+    self.child = nil
+    invalidateTimers()
+  }
+
+  /// For a handoff test or a manual check: the record as this process would read it.
+  var handoffRecord: HandoffRecord? { HandoffStore.load() }
+
+  private func invalidateTimers() {
+    watchTimer?.invalidate()
+    readyTimer?.invalidate()
+    stopTimer?.invalidate()
+    killTimer?.invalidate()
+    uptimeTimer?.invalidate()
+    watchTimer = nil
+    readyTimer = nil
+    stopTimer = nil
+    killTimer = nil
+    uptimeTimer = nil
+  }
+
 }
 
 /// The on-disk log the panel's "Open log" button opens.
@@ -495,7 +737,7 @@ final class LiveBackend: HarnessBackend {
 /// Small, append-only, and rotated by hand: one file over 1 MB becomes `.1`. This
 /// is deliberately not unified logging, because the user needs to read dsh's own
 /// lines and copy them.
-final class LogFileWriter {
+final class LogFileWriter: @unchecked Sendable {
   let url: URL
   private let lock = NSLock()
   private var handle: FileHandle?

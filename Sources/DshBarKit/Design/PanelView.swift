@@ -189,7 +189,7 @@ public struct PanelView: View {
         EmptyView()
 
       case .failed:
-        if let secondary = copy.secondaryLabel(snapshot), snapshot.failure?.port != nil {
+        if let secondary = copy.secondaryLabel(snapshot), snapshot.failure?.recovery != nil {
           HStack(spacing: Metrics.actionGap) {
             Button { actions(.primary) } label: {
               Text(copy.primaryLabel(snapshot))
@@ -245,7 +245,11 @@ public struct PanelView: View {
     switch snapshot.phase {
     case .listening:
       if snapshot.owner == .external {
-        externalNote
+        if snapshot.handoff {
+          handoffNote
+        } else {
+          externalNote
+        }
       } else if !snapshot.log.isEmpty {
         LogTail(lines: snapshot.log, copy: copy, palette: palette, onOpenLog: { actions(.openLog) })
           .padding(.horizontal, Metrics.pad)
@@ -276,6 +280,17 @@ public struct PanelView: View {
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(.horizontal, Metrics.pad)
     .padding(.top, Metrics.detailTop)
+  }
+
+  private var handoffNote: some View {
+    Text(copy.handoffNote)
+      .font(Typography.body)
+      .foregroundStyle(palette.warn)
+      .lineSpacing(3)
+      .fixedSize(horizontal: false, vertical: true)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.horizontal, Metrics.pad)
+      .padding(.top, Metrics.detailTop)
   }
 
   private var unavailableNote: some View {

@@ -3,3 +3,12 @@ build/
 .DS_Store
 *.xcodeproj
 .swiftpm/
+
+# Local tooling artifacts
+renders.db
+*.db
+
+# dshbar-snap writes one PNG per scene × theme × language; the contact sheet is the copy
+# that gets reviewed, so these are not tracked (the hand-shot panel-live-*.png still are).
+docs/design/panel-*-light-*.png
+docs/design/panel-*-dark-*.png

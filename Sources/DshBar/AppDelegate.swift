@@ -96,7 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     switch action {
     case .primary:
       switch model.snapshot.phase {
-      case .stopped, .failed: model.start()
+      case .stopped, .failed: startFromPanel()
       case .listening: openLaunchURL()
       case .unavailable: chooseBinary()
       case .starting, .stopping: break
@@ -111,7 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if model.snapshot.failure?.port != nil {
           model.update(port: BarPreferences.autoPort)
         }
-        model.start()
+        startFromPanel()
       default: break
       }
     case .restart:
@@ -131,6 +131,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
+  /// Every path that starts the server comes through here.
+  ///
+  /// The `~/Documents` grant is asked for at this click, not at launch: that is the
+  /// moment the folder is actually needed, and it keeps an idle menu bar app from
+  /// putting a dialog on screen. The status panel is folded away first so the open
+  /// panel is the only thing asking for attention.
+  private func startFromPanel() {
+    if model.owesDocumentsGrant {
+      panel.hide(returnFocus: false)
+    }
+    model.start()
+  }
+
   private func openLaunchURL() {
     // An external server has no token to append; opening its root still lands on
     // the dsh page (or its 401 fence), which is the best this app can offer.
@@ -144,7 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if settingsWindow == nil {
       let hosting = NSHostingView(rootView: SettingsView(model: model))
       let window = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 460, height: 312),
+        contentRect: NSRect(x: 0, y: 0, width: SettingsMetrics.width, height: SettingsMetrics.height),
         styleMask: [.titled, .closable],
         backing: .buffered,
         defer: false
@@ -166,7 +179,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
         guard let self else { return }
         let renderer = ImageRenderer(
-          content: SettingsView(model: self.model).frame(width: 460, height: 312)
+          content: SettingsView(model: self.model)
+            .frame(width: SettingsMetrics.width, height: SettingsMetrics.height)
         )
         renderer.scale = 2
         guard

@@ -48,7 +48,11 @@ macOS 菜单栏里的 dsh 管理器：把 `dsh --profile web` 挂在它下面，
 
 面板上的每个状态都来自一个真实的 `dsh --profile web`：
 
-- **找到 dsh**。GUI 应用的 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，里面没有 `node`；而 `dsh` 是 `#!/usr/bin/env node` 脚本，从这种环境里跑会直接失败（`env: node: No such file or directory`）。所以每次启动前抓一次登录 shell 的 `env -0`（约 10ms，实测 50 个变量），用它的 PATH 依次在 `PATH`、`~/.nvm/versions/node/*/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 里找。设置里指定的路径最优先，`DSHBAR_DSH_PATH` 次之。
+- **找到 dsh，并让它的 node 也能找到**。GUI 应用的 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，里面既没有 `node` 也没有 nvm；而 `dsh` 是 `#!/usr/bin/env node` 脚本，从这种环境里跑会直接失败（`env: node: No such file or directory`）。这里有三个必须一起做对的点：
+  1. **问交互式登录 shell**。`zsh -lic 'printf <marker>; command env -0'` 才会读 `~/.zshrc`，而 nvm / miniforge / 代理导出一般只写在那里；`zsh -lc` 只读 `.zshenv`/`.zprofile`，拿到的 PATH 里没有 node——这正是之前"点开 app 起不来"的原因。marker 之后的内容才解析，所以 `.zshrc` 的欢迎语和提示符转义污染不了第一个变量。`-lic` 没有 node 时再试 `-lc`，两者都没有才退回进程环境（每次 resolve 都在日志里留一行 `spawn env: … PATH head … node …`）。
+  2. **把 dsh 自己的目录放到 PATH 最前面**。`node` 就在 `…/node/v24.22.2/bin/dsh` 旁边，前置这个目录既保证找得到 node，也保证用的是装 dsh 时那个版本，而不是 nvm default alias 指向另一个版本。
+  3. **找不到 node 就别装作在启动**。spawn 之前读一次可执行文件的第一行：确实是 `#!/usr/bin/env node` 而 PATH 里没有 node，就不发子进程，直接报「找不到 node。／dsh 是 #!/usr/bin/env node 脚本……检查 ~/.zshrc 里 nvm 的导出」，而不是让面板显示一个 `退出码 127`。
+- **检测不等 shell**。`redetect` 只用缓存或进程环境，locator 本来就能从 `~/.nvm/versions/node/*/bin`、Homebrew、`/usr/local/bin` 里把 dsh 找出来，所以面板第一帧不会被一次 1.5 秒的 shell 启动卡住；真正 spawn 前才会阻塞等环境，而那时面板已经写着「正在启动…」。设置里指定的路径最优先，`DSHBAR_DSH_PATH` 次之。
 - **先探端口，再启动**。裸 socket `connect()` 之后发一次无 token 的 `GET /`：`401` + `dsh web authentication required` 就是外部 dsh，面板直接显示"正在监听 / 由终端启动"；端口有响应但指纹不对，就是 `端口 N 已被占用。`，不浪费两秒去 spawn 一个注定失败的进程。
 - **只认那一行**。就绪信号是 `dsh web: <url>` 且带单个 `token` 参数；stderr 里的插件崩溃、`DSH_MOBILE_NETWORK_*` 警告只进日志，不参与判定。
 - **一直在看**。端口不是只在按「启动」时才探测：app 启动后、每次打开面板、改端口之后，以及未运行 / 外部实例状态下每 5 秒，都会探一次。所以终端里起的 dsh 会自己出现在面板上（显示「由终端启动」），终端里 Ctrl-C 掉，面板几秒内也会回到「未运行」。已经由 app 管理的实例不轮询——它的退出有进程回调。
@@ -73,7 +77,48 @@ macOS 菜单栏里的 dsh 管理器：把 `dsh --profile web` 挂在它下面，
 ![真实监听](docs/design/panel-live-3099.png)
 ![外部实例](docs/design/panel-live-external-3080.png)
 
-设置窗口现在有三个真值：dsh 路径（`更改…` / `重新检测`）、端口（`0` = 自动）、profile；启动时还会异步跑 `dsh --version` 显示版本。演示模式（`DSHBAR_DEMO=1`）保留下来供设计评审，右键的"外观预览状态"子菜单只在演示模式里出现。
+设置窗口现在有四块真值：dsh 路径（`更改…` / `重新检测`）、端口（`0` = 自动）、profile、文稿文件夹权限；启动时还会异步跑 `dsh --version` 显示版本。演示模式（`DSHBAR_DEMO=1`）保留下来供设计评审，右键的"外观预览状态"子菜单只在演示模式里出现。
+
+## 文稿文件夹权限
+
+dsh 的默认工作区是 `~/Documents/deepseek-harness/default-workspace`，而 macOS 把 `~/Documents` 当受保护目录：没被授权的进程 `opendir` 直接拿 `EPERM`，系统再弹一句"想访问你的文稿文件夹"。dsh 是 dsh bar 的子进程，TCC 把这次访问算在 dsh bar 头上——所以弹窗上写的是 dsh bar，而它每启动一次就来一次。
+
+两个原因叠在一起：
+
+1. **TCC 按代码身份记授权**。`scripts/build-app.sh` 一直是 ad-hoc 签名，每次重编译 cdhash 都变，系统看到的就是"一个从没见过的新 app"，于是重新问。
+2. **不授权就起不来**。工作区在读不到时 dsh 只会抛 `EPERM`，看上去像是别的地方坏了。
+
+现在的做法分三层，各管一件事：
+
+| 层 | 做什么 |
+|---|---|
+| 点「启动」时才问 | 按下启动、而文件夹还没有书签时，app 才用 `NSOpenPanel` 预选 `~/Documents` 让你点一次「授权…」。启动 app、常驻菜单栏、打开设置都不会弹任何对话框——权限只在真正需要它的那一下被要求。用户的选择本身就是系统认的 user intent，不再走系统那句弹窗 |
+| 记住它 | 选择存成 security-scoped bookmark（`UserDefaults` 的 `documentsFolderBookmark`），每次启动 `resolve` + `startAccessingSecurityScopedResource()`，spawn 子进程之前再取一次 |
+| 不盲读 | 启动时**不**探测文件夹（探测本身就会触发系统弹窗），状态显示「未请求」；只有已存书签或你点「重新检查」时才真的读一次 |
+
+顺手把签名也稳住了：`build-app.sh` 会优先用登录钥匙串里的 Code Signing 证书（`DSHBAR_SIGN_IDENTITY` 指定，或自动取第一个），没有才退回 ad-hoc，并把 cdhash 打出来——换证书前后对比一下就知道系统认的是不是同一个 app。
+
+| 状态词 | 含义 |
+|---|---|
+| `未请求`（琥珀） | 还没问过，也没读过 |
+| `已授权 · 12 项` | 现在读得动，数字是目录项数 |
+| `未授权`（砖红） | 系统记着拒绝，或读被拒 |
+| `文件夹不存在` | 路径不在（或被 `DSHBAR_DOCUMENTS_FOLDER` 指到了别处） |
+
+![文件夹权限（中文）](docs/design/sheet-settings-folder-zhHans.png)
+![Folder access (English)](docs/design/sheet-settings-folder-en.png)
+
+读不到的时候，面板输出里会先出现一行 `dsh bar: no read access to ~/Documents …`，而不是等着 dsh 在里面报一个看不懂的 `EPERM`。授权面板取消了也可以继续启动（面板上会留这行说明），dsh 要是真的读不到工作区，失败原因就在输出里。
+
+复位与调试：
+
+```sh
+tccutil reset SystemPolicyDocumentsFolder dev.dsh.bar        # 清掉系统里的授权，重新看那一次询问
+defaults delete dev.dsh.bar documentsFolderBookmark          # 只删书签（下次点「启动」会重新问）
+DSHBAR_DOCUMENTS_FOLDER=/tmp/somewhere ...                   # 换一个目标文件夹，用来看「未请求 / 未授权」两种状态
+```
+
+询问只有一个触发点：在面板上按「启动」（失败状态的「重试」和「换一个空闲端口」也走同一条路）。设置里的「授权…」可以随时补授权，不需要等到下一次启动。
 
 ## 动效
 
@@ -106,7 +151,7 @@ macOS 菜单栏里的 dsh 管理器：把 `dsh --profile web` 挂在它下面，
 ## 跑起来
 
 ```sh
-./scripts/build-app.sh          # 产出 build/dsh bar.app（ad-hoc 签名）
+./scripts/build-app.sh          # 产出 build/dsh bar.app（有 Code Signing 证书就签名，否则 ad-hoc）
 open "build/dsh bar.app"        # 菜单栏出现图标，点开就是面板
 ```
 
@@ -115,8 +160,8 @@ open "build/dsh bar.app"        # 菜单栏出现图标，点开就是面板
 开发与验证：
 
 ```sh
-swift run dshbar-check                            # 248 项校验：文案、状态谓词、解析、状态机、fixture、图标帧
-swift run dshbar-smoke --port 3099                # 真机端到端：定位 → 启动 → 校验 URL/401 → 停止 → 端口释放
+swift run dshbar-check                            # 297 项校验：文案、状态谓词、解析、状态机、fixture、图标帧、文件夹权限、node/PATH
+swift run dshbar-smoke --port 3099                # 真机端到端：定位 → node 可解析 → 启动 → 校验 URL/401 → 停止 → 端口释放
 swift run dshbar-smoke --external --port 3099     # 接管前半段：lsof 找 pid → ps 校验命令行 → SIGTERM → 端口释放
 swift run dshbar-snap docs/design                 # 离屏渲染所有状态 → PNG（浅/深 × 中/英）
 DSHBAR_OPEN_PANEL=1 "build/dsh bar.app/Contents/MacOS/DshBar"   # 启动即弹面板
@@ -158,7 +203,7 @@ Sources/DshBar/               菜单栏 app：NSStatusItem + NSPanel + SwiftUI
   DemoBackend.swift           演示驱动（fixture 状态，供设计评审）
 Sources/DshBarSnapshot/       离屏出图工具（ImageRenderer → PNG）
 Sources/DshBarSmoke/          真机端到端验证（启动 → 校验 → 停止）
-Sources/DshBarCheck/          248 项断言的可执行检查（不依赖 XCTest / Xcode）
+Sources/DshBarCheck/          297 项断言的可执行检查（不依赖 XCTest / Xcode）
 scripts/                      build-app.sh / make-icon.swift
 docs/design/                  外观图（评审用）
 ```

@@ -15,6 +15,10 @@ struct SettingsView: View {
   @State private var portError = false
   @State private var profileText = ""
 
+  @Environment(\.colorScheme) private var scheme
+
+  private var palette: Palette { Palette.forScheme(scheme) }
+
   private var copy: Copy { model.copy }
   private var labelFont: Font { .system(size: 12) }
 
@@ -82,6 +86,12 @@ struct SettingsView: View {
 
       Divider().padding(.vertical, 14)
 
+      sectionTitle(copy.folderSection)
+
+      folderRow
+
+      Divider().padding(.vertical, 14)
+
       sectionTitle(copy.appearanceSection)
 
       HStack(spacing: 12) {
@@ -98,8 +108,11 @@ struct SettingsView: View {
       footer
     }
     .padding(20)
-    .frame(width: 460, height: 312, alignment: .topLeading)
-    .onAppear(perform: syncFields)
+    .frame(width: SettingsMetrics.width, height: SettingsMetrics.height, alignment: .topLeading)
+    .onAppear {
+      syncFields()
+      model.refreshDocumentsAccess(probe: false)
+    }
     .onChange(of: model.preferences) { _, next in
       // The controller can change the port itself ("use a free port"), so the
       // fields follow the model rather than fighting it.
@@ -136,6 +149,67 @@ struct SettingsView: View {
       Button(copy.detectAgain) { model.refreshDetection() }
         .controlSize(.small)
     }
+  }
+
+  /// `~/Documents` holds dsh's default workspace and is TCC-protected, so the row
+  /// has to be honest about two different things: whether a bookmark is remembered,
+  /// and whether a read works right now.
+  private var folderRow: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(alignment: .firstTextBaseline, spacing: 12) {
+        Text(copy.documentsFolder)
+          .font(labelFont)
+          .foregroundStyle(.secondary)
+          .frame(width: 92, alignment: .leading)
+
+        Text(model.documentsFolder.displayPath)
+          .font(.system(size: 11.5, design: .monospaced))
+          .lineLimit(1)
+          .truncationMode(.middle)
+          .help(model.documentsFolder.folder.path)
+
+        Text(copy.folderState(model.documentsFolder))
+          .font(.system(size: 10.5, design: .monospaced))
+          .foregroundStyle(folderStateStyle)
+          .fixedSize()
+
+        Spacer(minLength: 8)
+      }
+
+      Text(folderNote)
+        .font(.system(size: 10.5))
+        .foregroundStyle(.tertiary)
+        .padding(.leading, 104)
+        .fixedSize(horizontal: false, vertical: true)
+
+      // The actions get their own line: three buttons plus a path plus a state
+      // word do not fit in one row, and a truncated path is worse than a second line.
+      HStack(spacing: 8) {
+        Spacer(minLength: 104)
+        Button(copy.recheck) { model.refreshDocumentsAccess() }
+          .controlSize(.small)
+        Button(copy.authorize) { model.grantDocumentsFolder() }
+          .controlSize(.small)
+        Button(copy.openSystemSettings) { model.openPrivacySettings() }
+          .controlSize(.small)
+      }
+    }
+  }
+
+  private var folderStateStyle: AnyShapeStyle {
+    switch model.documentsFolder.state {
+    case .granted: return AnyShapeStyle(.secondary)
+    case .denied: return AnyShapeStyle(palette.fail)
+    case .notRequested: return AnyShapeStyle(palette.warn)
+    case .missing: return AnyShapeStyle(palette.fail)
+    }
+  }
+
+  private var folderNote: String {
+    if let error = model.folderError {
+      return error
+    }
+    return model.documentsFolder.state == .denied ? copy.folderDeniedNote : copy.folderNote
   }
 
   private var footer: some View {
@@ -202,6 +276,13 @@ struct SettingsView: View {
       model.chooseBinary(url.path)
     }
   }
+}
+
+/// The settings window is a fixed-size sheet, so its height lives in one place:
+/// the view, the window, and the offscreen snapshot renderer all read it.
+enum SettingsMetrics {
+  static let width: CGFloat = 460
+  static let height: CGFloat = 436
 }
 
 /// A monochrome stand-in for the system segmented control, so settings share the

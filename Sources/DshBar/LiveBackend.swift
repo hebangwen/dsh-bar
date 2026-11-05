@@ -23,6 +23,8 @@ final class LiveBackend: HarnessBackend {
   private var detection: DshDetection?
   private var environment: [String: String]?
   private var environmentDate: Date?
+  private var environmentSource: LoginShellEnvironment.Source?
+  private var isWarmingEnvironment = false
 
   private var watchTimer: Timer?
   private var readyTimer: Timer?
@@ -44,16 +46,7 @@ final class LiveBackend: HarnessBackend {
     startWatching()
     // The first Start should not pay for a shell launch, and a hung rc file must
     // not be able to block the click.
-    probeQueue.async { [weak self] in
-      let resolved = LoginShellEnvironment.resolve()
-      DispatchQueue.main.async {
-        MainActor.assumeIsolated {
-          guard let self, self.environment == nil else { return }
-          self.environment = resolved.values
-          self.environmentDate = Date()
-        }
-      }
-    }
+    warmEnvironment()
   }
 
   // MARK: - HarnessBackend
@@ -90,7 +83,9 @@ final class LiveBackend: HarnessBackend {
   }
 
   func redetect() -> DshLookup {
-    let values = currentEnvironment()
+    // Detection must not wait on a shell: it runs while the panel is drawn, and the
+    // locator already finds dsh through nvm/Homebrew paths without a PATH.
+    let values = environmentForDetection()
     let lookup = DshLocator.resolve(
       explicit: preferences.binaryPath,
       pathEnv: values["PATH"],
@@ -268,7 +263,54 @@ final class LiveBackend: HarnessBackend {
       arguments.append(contentsOf: ["--port", "\(port)"])
     }
 
-    let values = currentEnvironment()
+    // The child inherits this process's TCC identity, so the grant has to be held
+    // here — and re-acquired per spawn, because a bookmark resolved at launch can
+    // be dropped by a TCC reset in between. When it is missing the start would fail
+    // deep inside dsh with an unexplained `EPERM`, so say it here instead.
+    let documents = DocumentsAccess.store
+    _ = documents.startAccessing()
+    let access = documents.snapshot(probe: documents.hasBookmark)
+    // Probing an ungranted TCC folder is what raises the system sheet, so this only
+    // reads when a bookmark says it may. Without one the line says what to do
+    // instead of guessing that the read would fail.
+    let folderNote: String?
+    switch access.state {
+    case .denied:
+      folderNote = "read access to \(access.displayPath) was refused; dsh's default workspace lives there"
+        + " — grant it in Settings › Folder access"
+    case .notRequested:
+      folderNote = "no folder grant stored for \(access.displayPath); dsh's default workspace lives there"
+        + " — authorize it in Settings › Folder access"
+    case .granted, .missing:
+      folderNote = nil
+    }
+    if let folderNote {
+      writer.note(folderNote)
+      append(line: "dsh bar: \(folderNote)", stream: .err)
+    }
+
+    var values = currentEnvironment()
+    // The `node` that matters is the one dsh was installed with, and it sits in the
+    // same directory. Putting that directory first keeps `#!/usr/bin/env node` from
+    // picking a different runtime — or, on a GUI launch, finding none at all.
+    values["PATH"] = LoginShellEnvironment.runnablePath(
+      forExecutable: detection.path,
+      environment: values
+    )
+    let node = LoginShellEnvironment.nodePath(onPath: values["PATH"])
+    let head = (values["PATH"] ?? "").split(separator: ":").prefix(3).joined(separator: ":")
+    writer.note("spawn env: \(environmentSource?.rawValue ?? "unknown") · PATH head \(head) · node \(node ?? "missing")")
+
+    if node == nil, DshLocator.isEnvNodeScript(at: detection.path) {
+      let detail = "no node on PATH (\(head)…)"
+      writer.note("not spawning: \(detail)")
+      append(line: "dsh bar: \(detail)", stream: .err)
+      DispatchQueue.main.async { [weak self] in
+        self?.dispatch(.spawnFailed(HarnessFailure(kind: .nodeMissing, detail: detail)))
+      }
+      return
+    }
+
     do {
       let child = try ChildProcess(
         executable: detection.path,
@@ -398,17 +440,51 @@ final class LiveBackend: HarnessBackend {
 
   // MARK: - Environment
 
-  /// The login shell is the only place PATH includes nvm's node; it costs about
-  /// ten milliseconds, so it is re-read per launch and cached for a minute.
+  /// Asks the interactive login shell once, off the main thread. `zsh -lic` is the
+  /// only shell that reads `~/.zshrc`, which is where nvm puts `node` — a
+  /// GUI-launched app inherits neither.
+  private func warmEnvironment() {
+    guard !isWarmingEnvironment else { return }
+    isWarmingEnvironment = true
+    probeQueue.async { [weak self] in
+      let resolved = LoginShellEnvironment.resolve()
+      DispatchQueue.main.async {
+        MainActor.assumeIsolated {
+          guard let self else { return }
+          self.isWarmingEnvironment = false
+          self.environment = resolved.values
+          self.environmentSource = resolved.source
+          self.environmentDate = Date()
+        }
+      }
+    }
+  }
+
+  /// For the locator: whatever is cached, else the app's own environment, with a
+  /// refresh kicked off in the background. Never blocks.
+  private func environmentForDetection() -> [String: String] {
+    if let environment { return environment }
+    warmEnvironment()
+    return ProcessInfo.processInfo.environment
+  }
+
+  /// For the spawn: blocks when the cache is cold, because a PATH without `node`
+  /// is exactly the failure this whole path exists to prevent.
   private func currentEnvironment() -> [String: String] {
     if let environment, let environmentDate, Date().timeIntervalSince(environmentDate) < 60 {
       return environment
     }
     let resolved = LoginShellEnvironment.resolve()
     environment = resolved.values
+    environmentSource = resolved.source
     environmentDate = Date()
-    if resolved.source == .process {
-      writer.note("login shell environment unavailable; falling back to the process environment")
+    switch resolved.source {
+    case .process:
+      writer.note("no shell answered; falling back to the process environment (PATH: \(resolved.values["PATH"] ?? "empty"))")
+    case .interactiveShell:
+      writer.note("environment from the interactive login shell")
+    case .loginShell:
+      writer.note("environment from the login shell (no rc); ~/.zshrc exports are missing")
     }
     return resolved.values
   }

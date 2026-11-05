@@ -45,8 +45,21 @@ enum Smoke {
     }
     print("✓ dsh: \(detection.path) (\(detection.source.rawValue))")
 
+    // Same PATH the app builds: dsh's own directory first, because that is where
+    // the `node` matching this dsh lives. Without it the spawn dies inside
+    // `/usr/bin/env` with "node: No such file or directory".
+    var spawnEnvironment = environment.values
+    spawnEnvironment["PATH"] = LoginShellEnvironment.runnablePath(
+      forExecutable: detection.path,
+      environment: spawnEnvironment
+    )
+    check(
+      LoginShellEnvironment.hasNode(onPath: spawnEnvironment["PATH"]),
+      "PATH resolves node for dsh (\(LoginShellEnvironment.nodePath(onPath: spawnEnvironment["PATH"]) ?? "none"))"
+    )
+
     if arguments.contains("--external") {
-      exit(takeOver(environment: environment.values, detection: detection, port: requested))
+      exit(takeOver(environment: spawnEnvironment, detection: detection, port: requested))
     }
 
     let before = PortProbe.probe(port: requested)
@@ -65,7 +78,7 @@ enum Smoke {
       child = try ChildProcess(
         executable: detection.path,
         arguments: ["--profile", preferences.profile, "--no-open", "--port", "\(requested)"],
-        environment: environment.values
+        environment: spawnEnvironment
       )
     } catch {
       print("✗ spawn failed: \(error)")

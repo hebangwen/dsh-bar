@@ -727,6 +727,221 @@ func runChecks() -> Int32 {
     checks.equal(image.size, NSSize(width: 18, height: 18), "\(phase) glyph size")
   }
 
+  // MARK: - Folder access
+
+  let scratch = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+    .appendingPathComponent("dshbar-check-\(UUID().uuidString)", isDirectory: true)
+  try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+  FileManager.default.createFile(
+    atPath: scratch.appendingPathComponent("note.txt").path,
+    contents: Data("x".utf8)
+  )
+
+  let readable = FolderAccessStore.probe(scratch)
+  checks.equal(readable.state, FolderAccessState.granted, "a folder we own reads as granted")
+  checks.equal(readable.entryCount, 1, "the probe counts the entries")
+
+  let gone = FolderAccessStore.probe(scratch.appendingPathComponent("nope", isDirectory: true))
+  checks.equal(gone.state, FolderAccessState.missing, "a path that does not exist is missing")
+
+  let file = scratch.appendingPathComponent("note.txt")
+  checks.equal(FolderAccessStore.probe(file).state, FolderAccessState.missing, "a file is not a folder")
+
+  // The refusal path is the one that matters: TCC denies a read with
+  // NSCocoaErrorDomain 257, and a chmod 000 folder reproduces the same errno.
+  let locked = scratch.appendingPathComponent("locked", isDirectory: true)
+  try? FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+  chmod(locked.path, 0o000)
+  let denial = FolderAccessStore.probe(locked)
+  checks.equal(denial.state, FolderAccessState.denied, "an unreadable folder is reported as denied")
+  checks.check(denial.detail?.contains("257") == true, "the denial names the cocoa error")
+  chmod(locked.path, 0o755)
+
+  let home = FileManager.default.homeDirectoryForCurrentUser
+  checks.equal(
+    FolderAccessStore.shortPath(home.appendingPathComponent("Documents", isDirectory: true)),
+    "~/Documents",
+    "the home directory is abbreviated"
+  )
+  checks.equal(FolderAccessStore.shortPath(home), "~", "the home directory itself is ~")
+  checks.equal(
+    FolderAccessStore.shortPath(URL(fileURLWithPath: "/opt/data")),
+    "/opt/data",
+    "paths outside the home stay absolute"
+  )
+
+  // A throwaway defaults domain: the bookmark layer must survive a relaunch, which
+  // is the whole point of storing it.
+  let folderSuite = "dev.dsh.bar.check.\(UUID().uuidString)"
+  if let domain = UserDefaults(suiteName: folderSuite) {
+    let store = FolderAccessStore(defaults: domain, folder: scratch)
+    checks.check(!store.hasBookmark, "nothing is remembered before the first grant")
+    checks.equal(store.snapshot().state, FolderAccessState.granted, "an ungrated but readable folder still reads")
+    // A read is what raises the system sheet, so the report must be able to say
+    // "not asked" without touching the folder.
+    checks.equal(
+      store.snapshot(probe: false).state,
+      FolderAccessState.notRequested,
+      "an unprobed, unremembered folder reports not requested"
+    )
+    checks.check(!store.startAccessing(), "no bookmark means no scope to acquire")
+
+    let granted = try? store.grant(scratch)
+    checks.check(store.hasBookmark, "granting stores a bookmark")
+    checks.equal(granted?.state, FolderAccessState.granted, "a granted folder reads back as granted")
+    checks.equal(store.storedPath, scratch.path, "the granted path is remembered")
+    checks.check(store.startAccessing(), "the bookmark resolves after a relaunch")
+    checks.equal(
+      store.snapshot(probe: false).state,
+      FolderAccessState.granted,
+      "a remembered grant is read even when the caller asks for no probe"
+    )
+    checks.equal(store.snapshot().displayPath, FolderAccessStore.shortPath(scratch), "the row shows the granted folder")
+
+    store.revoke()
+    checks.check(!store.hasBookmark, "revoking drops the bookmark")
+    checks.equal(store.snapshot().state, FolderAccessState.granted, "revoking does not touch the folder itself")
+    domain.removePersistentDomain(forName: folderSuite)
+  } else {
+    checks.check(false, "a throwaway defaults domain could not be created")
+  }
+
+  try? FileManager.default.removeItem(at: scratch)
+
+  // MARK: Copy — folder access
+
+  checks.equal(en.folderSection, "Folder access", "en folder section")
+  checks.equal(zh.folderSection, "文件夹权限", "zh folder section")
+  checks.equal(en.authorize, "Authorize…", "en authorize")
+  checks.equal(zh.documentsFolder, "文稿文件夹", "zh documents label")
+  checks.check(zh.folderNote.contains("书签"), "zh note explains the remembered grant")
+  checks.check(en.folderDeniedNote.contains("System Settings"), "en denied note points at System Settings")
+  checks.check(zh.grantMessage.contains("~/Documents/deepseek-harness"), "the prompt says why")
+
+  let grantSnapshot = FolderAccessSnapshot(
+    folder: URL(fileURLWithPath: "/tmp/Documents"),
+    displayPath: "~/Documents",
+    state: .granted,
+    entryCount: 6,
+    detail: nil,
+    hasBookmark: true,
+    scoped: true
+  )
+  checks.equal(en.folderState(grantSnapshot), "granted · 6 items", "en granted label counts entries")
+  checks.equal(zh.folderState(grantSnapshot), "已授权 · 6 项", "zh granted label counts entries")
+  checks.equal(
+    en.folderState(
+      FolderAccessSnapshot(
+        folder: URL(fileURLWithPath: "/tmp/Documents"),
+        displayPath: "~/Documents",
+        state: .notRequested,
+        entryCount: 0,
+        detail: nil,
+        hasBookmark: false,
+        scoped: false
+      )
+    ),
+    "not requested",
+    "an unasked folder is not called denied"
+  )
+  checks.check(
+    DocumentsAccess.defaultWorkspaceURL.path.hasSuffix("deepseek-harness/default-workspace"),
+    "the default workspace dsh uses is named once"
+  )
+
+  // MARK: - Environment for a GUI launch
+
+  // The bug this models: a Finder-launched app inherits almost nothing, so dsh's
+  // `#!/usr/bin/env node` cannot find its interpreter unless dsh's own directory
+  // leads the PATH.
+  checks.equal(
+    LoginShellEnvironment.prependDirectory("/nvm/v24/bin", toPath: "/usr/bin:/bin"),
+    "/nvm/v24/bin:/usr/bin:/bin",
+    "the dsh directory is prepended to PATH"
+  )
+  checks.equal(
+    LoginShellEnvironment.prependDirectory("/nvm/v24/bin", toPath: "/usr/bin:/nvm/v24/bin"),
+    "/nvm/v24/bin:/usr/bin",
+    "an existing entry moves to the front instead of duplicating"
+  )
+  checks.equal(
+    LoginShellEnvironment.prependDirectory("/nvm/v24/bin/", toPath: nil),
+    "/nvm/v24/bin",
+    "a trailing slash is trimmed and an empty PATH is acceptable"
+  )
+  checks.equal(
+    LoginShellEnvironment.runnablePath(
+      forExecutable: "/nvm/v24/bin/dsh",
+      environment: ["PATH": "/usr/bin"]
+    ),
+    "/nvm/v24/bin:/usr/bin",
+    "runnablePath leads with the executable's own directory"
+  )
+
+  let toolDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+    .appendingPathComponent("dshbar-tools-\(UUID().uuidString)", isDirectory: true)
+  try? FileManager.default.createDirectory(at: toolDir, withIntermediateDirectories: true)
+  let fakeNode = toolDir.appendingPathComponent("node")
+  FileManager.default.createFile(atPath: fakeNode.path, contents: Data("#!/bin/sh\nexit 0\n".utf8))
+  try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeNode.path)
+  checks.equal(
+    LoginShellEnvironment.nodePath(onPath: "/usr/bin:\(toolDir.path)"),
+    fakeNode.path,
+    "node is found through PATH"
+  )
+  checks.check(!LoginShellEnvironment.hasNode(onPath: "/usr/bin:/bin"), "a bare PATH has no node")
+  let oddDir = toolDir.appendingPathComponent("odd", isDirectory: true)
+  try? FileManager.default.createDirectory(at: oddDir, withIntermediateDirectories: true)
+  FileManager.default.createFile(atPath: oddDir.appendingPathComponent("node").path, contents: Data())
+  checks.check(
+    !LoginShellEnvironment.hasNode(onPath: oddDir.path),
+    "a non-executable named node does not count"
+  )
+
+  let envNodeScript = toolDir.appendingPathComponent("dsh")
+  FileManager.default.createFile(
+    atPath: envNodeScript.path,
+    contents: Data("#!/usr/bin/env node\nconsole.log(1)\n".utf8)
+  )
+  checks.check(DshLocator.isEnvNodeScript(at: envNodeScript.path), "an env-node shebang is recognised")
+
+  let shellScript = toolDir.appendingPathComponent("sh-dsh")
+  FileManager.default.createFile(
+    atPath: shellScript.path,
+    contents: Data("#!/bin/sh\nexit 0\n".utf8)
+  )
+  checks.check(!DshLocator.isEnvNodeScript(at: shellScript.path), "a shell script needs no node")
+
+  let plainFile = toolDir.appendingPathComponent("plain")
+  FileManager.default.createFile(atPath: plainFile.path, contents: Data("console.log(1)\n".utf8))
+  checks.check(!DshLocator.isEnvNodeScript(at: plainFile.path), "a file without a shebang is not a node script")
+  checks.check(
+    !DshLocator.isEnvNodeScript(at: toolDir.appendingPathComponent("missing").path),
+    "a missing file is not a node script"
+  )
+
+  // `zsh -lic` prints prompt escapes before the command output; the marker is what
+  // keeps the first variable from being corrupted.
+  let noisy = Data("\u{1B}]0;title\u{07}\(LoginShellEnvironment.marker)HOME=/Users/x\u{0}PATH=/usr/bin\u{0}".utf8)
+  let sliced = LoginShellEnvironment.parse(LoginShellEnvironment.slice(noisy))
+  checks.equal(sliced["HOME"], "/Users/x", "prompt noise before the marker is dropped")
+  checks.equal(sliced["PATH"], "/usr/bin", "the marker does not leak into the first key")
+  checks.equal(
+    LoginShellEnvironment.parse(LoginShellEnvironment.slice(Data("HOME=/y\u{0}".utf8)))["HOME"],
+    "/y",
+    "output without a marker is parsed as it is"
+  )
+
+  let nodeDiagnosis = zh.diagnosis(HarnessFailure(kind: .nodeMissing))
+  checks.check(nodeDiagnosis.title.contains("node"), "zh node diagnosis names node")
+  checks.check(nodeDiagnosis.body.contains(".zshrc"), "zh node diagnosis points at ~/.zshrc")
+  checks.check(
+    en.diagnosis(HarnessFailure(kind: .nodeMissing)).body.contains("PATH"),
+    "en node diagnosis explains the PATH"
+  )
+
+  try? FileManager.default.removeItem(at: toolDir)
+
   return checks.report()
 }
 

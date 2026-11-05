@@ -35,6 +35,10 @@ public struct HarnessFailure: Sendable, Equatable {
   public enum Kind: Sendable, Equatable {
     case portInUse(port: Int)
     case binaryMissing
+    /// dsh is a `#!/usr/bin/env node` script and no `node` is on the PATH it would
+    /// get. Its own error line (`env: node: No such file or directory`) reads like
+    /// a dsh problem, so it gets its own kind and its own explanation.
+    case nodeMissing
     case exited(code: Int32?)
     case timeout(seconds: Int)
   }

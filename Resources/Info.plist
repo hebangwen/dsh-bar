@@ -28,6 +28,8 @@
   <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>dsh bar 需要读取「文稿文件夹」：dsh 的默认工作区在 ~/Documents/deepseek-harness。dsh bar needs to read your Documents folder because dsh's default workspace lives there.</string>
   <key>NSSupportsAutomaticTermination</key>
   <false/>
   <key>NSSupportsSuddenTermination</key>

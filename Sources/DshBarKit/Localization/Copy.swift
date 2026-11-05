@@ -213,6 +213,57 @@ public struct Copy: Sendable {
 
   public var notDetected: String { zh("未找到", "not found") }
 
+  // MARK: - Folder access
+
+  /// `~/Documents` is TCC-protected; dsh's default workspace lives inside it, so
+  /// the app has to hold that grant or every launch starts with a system sheet.
+  public var folderSection: String { zh("文件夹权限", "Folder access") }
+
+  public var documentsFolder: String { zh("文稿文件夹", "Documents") }
+
+  public var authorize: String { zh("授权…", "Authorize…") }
+
+  public var openSystemSettings: String { zh("系统设置…", "System Settings…") }
+
+  public var recheck: String { zh("重新检查", "Check again") }
+
+  public var grantPrompt: String { zh("授权", "Authorize") }
+
+  public var grantMessage: String {
+    zh(
+      "点「启动」时才会问这一次：选中「文稿文件夹」再点授权。dsh 的默认工作区在 ~/Documents/deepseek-harness，选过之后系统不会再问。",
+      "This is asked once, when you press Start: pick the Documents folder and authorize it. dsh's default workspace lives in ~/Documents/deepseek-harness; after this the system stops asking."
+    )
+  }
+
+  /// One line next to the row: what the state means for dsh, not what TCC is.
+  public func folderState(_ snapshot: FolderAccessSnapshot) -> String {
+    switch snapshot.state {
+    case .granted:
+      return zh("已授权 · \(snapshot.entryCount) 项", "granted · \(snapshot.entryCount) items")
+    case .denied:
+      return zh("未授权", "not authorized")
+    case .notRequested:
+      return zh("未请求", "not requested")
+    case .missing:
+      return zh("文件夹不存在", "folder missing")
+    }
+  }
+
+  public var folderNote: String {
+    zh(
+      "只在点「启动」时问一次：dsh bar 把选择记成书签，之后每次启动直接读，不再弹系统确认。",
+      "Asked once, when you press Start. dsh bar stores the choice as a bookmark and reads it directly on every later launch, with no system sheet."
+    )
+  }
+
+  public var folderDeniedNote: String {
+    zh(
+      "系统已记下拒绝，必须在「系统设置 → 隐私与安全性 → 文件与文件夹」里勾选 dsh bar，这里才能重新读到。",
+      "The system recorded a refusal. Tick dsh bar under System Settings → Privacy & Security → Files and Folders before this can read again."
+    )
+  }
+
   public var demoMode: String {
     zh("演示模式：状态由预览场景驱动。", "Demo mode: states are driven by preview scenes.")
   }
@@ -263,6 +314,14 @@ public struct Copy: Sendable {
         zh(
           "另一个进程正在监听这个端口。可以让系统挑一个空闲端口，或先停掉那个进程。",
           "Another process is listening there. Let dsh bar pick a free port, or stop that process first."
+        )
+      )
+    case .nodeMissing:
+      return (
+        zh("找不到 node。", "node is missing."),
+        zh(
+          "dsh 是 #!/usr/bin/env node 脚本，但 dsh bar 拿到的 PATH 里没有 node。图形界面启动的 app 不会读 ~/.zshrc，而 nvm 一般只写在那里——dsh bar 现在会读交互式登录 shell，并把 dsh 所在目录放到 PATH 最前面。仍然失败时，检查 ~/.zshrc 里 nvm 的导出，或把 node 装到 /opt/homebrew/bin。",
+          "dsh is a #!/usr/bin/env node script, but no node is on the PATH dsh bar builds. A GUI-launched app never reads ~/.zshrc, which is where nvm normally lives; dsh bar now reads the interactive login shell and puts dsh's own directory first on PATH. If it still fails, check the nvm export in ~/.zshrc, or install node somewhere on PATH."
         )
       )
     case .binaryMissing:

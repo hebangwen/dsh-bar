@@ -35,7 +35,8 @@ public enum DshLookup: Sendable, Equatable {
 /// A GUI app started from Finder inherits `/usr/bin:/bin:/usr/sbin:/sbin`, which
 /// has no `node`; `dsh` is a `#!/usr/bin/env node` script, so running it from
 /// that environment fails with `env: node: No such file or directory`. The fix is
-/// to ask the user's login shell for its PATH and then look there.
+/// to ask the user's **interactive** login shell for its environment (see
+/// `LoginShellEnvironment`) and to put dsh's own directory at the head of PATH.
 public enum DshLocator {
   public struct Candidate: Sendable, Equatable {
     public var path: String
@@ -102,6 +103,23 @@ public enum DshLocator {
       }
     }
     return 0
+  }
+
+  /// Why `node` has to be on the PATH at all: dsh is installed as a script whose
+  /// interpreter is resolved by `env`. Reading the first line is what lets the app
+  /// report "node is missing" instead of "dsh exited (code 127)".
+  public static func isEnvNodeScript(at path: String) -> Bool {
+    guard let handle = FileHandle(forReadingAtPath: path) else { return false }
+    defer { try? handle.close() }
+    let data = handle.readData(ofLength: 200)
+    guard
+      let text = String(data: data, encoding: .utf8),
+      text.hasPrefix("#!")
+    else { return false }
+    let firstLine = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+      .first
+      .map(String.init) ?? text
+    return firstLine.contains("env") && firstLine.contains("node")
   }
 
   public static func isExecutable(_ path: String, fileManager: FileManager = .default) -> Bool {

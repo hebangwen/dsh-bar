@@ -6,6 +6,8 @@ macOS 菜单栏里的 dsh 管理器：把 `dsh --profile web` 挂在它下面，
 
 ![面板总览（中文）](docs/design/sheet-zhHans.png)
 
+英文总览图（同样的场景，英文文案）在 [sheet-en.png](docs/design/sheet-en.png)。
+
 ---
 
 ## 一眼看清的设计

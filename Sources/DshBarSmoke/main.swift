@@ -18,6 +18,12 @@ enum Smoke {
     // policy stays silent.
     let sleepRun = arguments.contains("--sleep")
     let sleepWanted = (value(for: "--sleep", in: arguments) ?? "on") != "off"
+    // `--flags` proves the optional argv reaches dsh: a bind address and a trusted
+    // authority, both loopback, so nothing leaves the machine.
+    let flagRun = arguments.contains("--flags")
+    let flags = flagRun
+      ? WebLaunchFlags(host: "127.0.0.1", trustedHosts: ["127.0.0.1:\(requested)"])
+      : .empty
     guard requested != 3080, (1...65535).contains(requested) else {
       print("refusing port \(requested): use something other than 3080, e.g. 3099")
       exit(1)
@@ -66,7 +72,7 @@ enum Smoke {
       exit(takeOver(environment: spawnEnvironment, detection: detection, port: requested))
     }
 
-    let before = PortProbe.probe(port: requested)
+    let before = PortProbe.probe(host: flags.host ?? "127.0.0.1", port: requested)
     guard before == .free else {
       print("✗ port \(requested) is not free (\(before)); stop it or pick another port")
       exit(1)
@@ -83,11 +89,18 @@ enum Smoke {
     var exitCode: Int32?
     var failureDetail: String?
 
+    let spawnArguments = flags.arguments(profile: preferences.profile, port: requested)
+    if flagRun {
+      print("· argv: \(spawnArguments.joined(separator: " "))")
+      check(spawnArguments.contains("--host"), "the bind flag reaches the argv")
+      check(spawnArguments.contains("--trusted-host"), "the trusted-host flag reaches the argv")
+      check(spawnArguments.contains("--port"), "the port flag survives next to them")
+    }
     let child: ChildProcess
     do {
       child = try ChildProcess(
         executable: detection.path,
-        arguments: ["--profile", preferences.profile, "--no-open", "--port", "\(requested)"],
+        arguments: spawnArguments,
         environment: spawnEnvironment
       )
     } catch {
@@ -123,6 +136,9 @@ enum Smoke {
       exit(1)
     }
     check(launch.port == requested, "launch URL reports the requested port (\(launch.port))")
+    if flagRun {
+      check(launch.host == "127.0.0.1", "the printed URL follows the bind address (\(launch.host))")
+    }
     check(!launch.token.isEmpty, "launch URL carries a token")
     print("✓ launch URL: \(launch.url)")
 

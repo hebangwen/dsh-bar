@@ -44,6 +44,10 @@ public struct HarnessFailure: Sendable, Equatable {
     case workspaceMissing(path: String)
     /// `DSH_HOME` is configured but points at something that is not a directory.
     case dshHomeMissing(path: String)
+    /// One of the optional `dsh web` flags in Settings cannot be sent: a wildcard
+    /// bind address, a certificate that moved, a patch file that is gone. The app
+    /// refuses the spawn instead of letting dsh fail with its own wording.
+    case launchFlags(WebLaunchFlags.Problem)
     case exited(code: Int32?)
     case timeout(seconds: Int)
   }
@@ -75,7 +79,7 @@ public struct HarnessFailure: Sendable, Equatable {
     switch kind {
     case .portInUse: return .freePort
     case .workspaceMissing, .dshHomeMissing: return .defaultPaths
-    case .binaryMissing, .nodeMissing, .exited, .timeout: return nil
+    case .binaryMissing, .nodeMissing, .exited, .timeout, .launchFlags: return nil
     }
   }
 
@@ -83,6 +87,9 @@ public struct HarnessFailure: Sendable, Equatable {
   public var path: String? {
     switch kind {
     case .workspaceMissing(let path), .dshHomeMissing(let path): return path
+    case .launchFlags(let problem):
+      if case let .missingFile(_, path) = problem { return path }
+      return nil
     default: return nil
     }
   }
@@ -140,6 +147,11 @@ public struct HarnessSnapshot: Sendable, Equatable {
   /// assertion for this server. The preference is not this flag: the panel draws
   /// the fact, and the fact can be absent (tool missing, guard died).
   public var awake: Bool
+  /// The `--host` the server is bound to (or would be, before a start). Nil means
+  /// dsh's own default, which is loopback.
+  public var bindHost: String?
+  /// `--tls-cert` and `--tls-key` were both sent: the printed URL is https.
+  public var secure: Bool
 
   public init(
     phase: HarnessPhase = .stopped,
@@ -154,7 +166,9 @@ public struct HarnessSnapshot: Sendable, Equatable {
     log: [LogLine] = [],
     busy: Bool = false,
     handoff: Bool = false,
-    awake: Bool = false
+    awake: Bool = false,
+    bindHost: String? = nil,
+    secure: Bool = false
   ) {
     self.phase = phase
     self.host = host
@@ -169,9 +183,24 @@ public struct HarnessSnapshot: Sendable, Equatable {
     self.busy = busy
     self.handoff = handoff
     self.awake = awake
+    self.bindHost = bindHost
+    self.secure = secure
   }
 
-  public var address: String { "\(host):\(port)" }
+  /// What the readout band shows. While serving, the printed URL is the truth (a
+  /// `--public-url` proxy entry can differ from the bind address); before a start,
+  /// the configured bind address is, because that is what Start will do.
+  public var address: String {
+    let shown = phase == .listening ? host : (bindHost ?? host)
+    return "\(shown):\(port)"
+  }
+
+  /// Serving beyond the machine: worth a word in the footer, because it is a
+  /// security decision the user made once in Settings.
+  public var sharesOnLAN: Bool {
+    guard let bindHost else { return false }
+    return !WebLaunchFlags.isLoopback(bindHost)
+  }
 
   /// The panel shows the output well whenever there is something to read.
   public var showsLog: Bool {

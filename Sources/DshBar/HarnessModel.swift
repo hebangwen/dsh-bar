@@ -239,10 +239,17 @@ final class HarnessModel: ObservableObject {
     backend.cancel()
   }
 
-  func copyLink() {
+  /// - Parameter redacted: hand out the URL without its launch token. The token is
+  ///   a bearer credential for `/api`, so pasting the full link into a chat window
+  ///   hands over the server; the panel's button copies the working link, the menu
+  ///   offers this one next to it.
+  func copyLink(redacted: Bool = false) {
     guard let url = launchURL else { return }
+    let value = redacted
+      ? (LogRedaction.urlWithoutToken(url) ?? LogRedaction.redactedURL(url))
+      : url
     NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(url, forType: .string)
+    NSPasteboard.general.setString(value, forType: .string)
     copied = true
     let reset = DispatchWorkItem { [weak self] in self?.copied = false }
     copyReset?.cancel()
@@ -391,6 +398,31 @@ final class HarnessModel: ObservableObject {
     next.workspacePath = nil
     next.dshHomeMode = .followShell
     next.dshHome = nil
+    apply(next)
+  }
+
+  // MARK: - Launch flags
+
+  /// Everything wrong with the flags a start would send, in the order Settings
+  /// shows them. Read live so a certificate that was moved is noticed before the
+  /// next Start, not by a failed launch.
+  var launchFlagProblems: [WebLaunchFlags.Problem] { preferences.launchFlags.problems() }
+
+  func applyLaunchFlags(_ flags: WebLaunchFlags) {
+    var next = preferences
+    next.setLaunchFlags(flags)
+    apply(next)
+  }
+
+  func addPatch(_ path: String) {
+    var next = preferences
+    next.patchPaths = BarPreferences.normalizePaths(next.patchPaths + [path])
+    apply(next)
+  }
+
+  func removePatch(_ path: String) {
+    var next = preferences
+    next.patchPaths = next.patchPaths.filter { $0 != path }
     apply(next)
   }
 

@@ -92,6 +92,27 @@ DSHBAR_DOCUMENTS_FOLDER=/tmp/somewhere ...                # 换目标文件夹�
 
 询问只有一个触发点：在面板上按「启动」（失败状态的「重试」和「换一个空闲端口」走同一条路）。设置里的「授权…」可以随时补授权，不必等到下次启动。
 
+## token 为什么必须打码
+
+`dsh web` 打印的启动 URL 带着 `?token=…`，而这个 token 是 `/api` 的 bearer：拿到 URL 就拿到服务器。0.5.0 把它写进了三个活得更久的地方——日志文件（实测 278 KB 里有 25 个）、面板的 Output 四行（截图就泄露）、`dshBarHandoff` 的 `launchURL`。0.6.0 的规矩是「一个打码点」：
+
+| 位置 | 谁打码 |
+|---|---|
+| 面板日志 + 磁盘日志 | `LiveBackend.append` 先打，`LogFileWriter` 再打一次（幂等） |
+| 交接记录 | `HandoffStore.save`（记录的唯一读者从不读 URL） |
+| 复制链接 | 只有用户主动选「复制不含凭证的链接」才去掉查询项 |
+
+`LogRedaction` 是扫描器不是正则：值字符集 `[A-Za-z0-9-._~+/=%]` 之外一律停，所以 `(…?token=abc).` 的括号不会被吞；`mytoken=` 前面是字母，不算 key。`redactedURL` 直接复用文本扫描——用 `URLComponents` 重建会把 `…` 变成 `%E2%80%A6`。旧文件在 `LogFileWriter.init` 里就地重写，变了才写，所以每次启动只是一次读。
+
+## 启动参数踩过的四个坑
+
+1. **`LaunchFlags` 这个名字不能用。** AppKit → HIServices 里有一个 `typedef UInt16 LaunchFlags`，Kit 里能编译，app target 一 import AppKit 就歧义。现在叫 `WebLaunchFlags`。
+2. **`--host` 不是主机名。** dsh 只收一个具体的本机 IPv4/IPv6 字面量，`0.0.0.0` / `::` / `*` 全拒。校验用 `inet_pton`，别用正则数点。
+3. **探针要跟着绑定地址走。** 绑到 `192.168.1.10` 的服务不在 `127.0.0.1` 上应答，探 127 会得到「空闲」然后把 spawn 撞进 `EADDRINUSE`。`PortProbe` 现在走 `getaddrinfo(AI_NUMERICHOST)` + `sockaddr_storage`，IPv4/IPv6 一套代码；非字面量返回 `free`（「不是我能判断的」）。
+4. **页脚放不下两个词。** 348 pt 里已经有 port / profile / 防休眠 / 退出；再加 `局域网` 和 `TLS` 两项，`profile web` 被截成 `profile…`。合成一个 `局域网 · TLS` 并把间距从 14 收到 10，才一行放下。
+
+另外两条与 TLS 有关的事实：证书和私钥必须成对（单边直接诊断，不 spawn）；TLS 打开后明文探针拿到的是 TLS 记录而不是 401，所以端口上的外部实例只能判「被占用」，不能「接管」——设置里如实写。
+
 ## 防止休眠的三条硬事实
 
 1. **`-i` 是唯一被允许的开关。** `-d` 会连屏幕一起点亮，`-u` 声明用户活跃（同样重置显示器计时器），`-s` 只在电源适配器下有效而范围更宽，`-m` 管的是磁盘。四条不使用写进 `Caffeinate.forbiddenFlags`，`dshbar-check` 逐条断言不出现。

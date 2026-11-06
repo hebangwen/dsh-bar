@@ -233,6 +233,7 @@ public struct PanelView: View {
           .buttonStyle(TextActionStyle(palette: palette))
           .disabled(!snapshot.hasLaunchURL)
           .opacity(snapshot.hasLaunchURL ? 1 : 0.4)
+          .help(copy.copyLinkHelp)
       }
       Spacer(minLength: 0)
     }
@@ -310,7 +311,9 @@ public struct PanelView: View {
     VStack(spacing: 0) {
       EngravedRule(palette: palette)
         .padding(.top, 10)
-      HStack(spacing: 14) {
+      // Ten points between footer words: the strip has to hold port, profile, the
+      // awake word, the network word and Quit without truncating the profile.
+      HStack(spacing: 10) {
         Button { actions(.settings) } label: {
           Text(copy.portLabel(snapshot.port))
             .font(Typography.meta)
@@ -322,6 +325,7 @@ public struct PanelView: View {
           Text(copy.profileLabel(snapshot.profile))
             .font(Typography.meta)
             .foregroundStyle(palette.inkTertiary)
+            .lineLimit(1)
         }
         .buttonStyle(.plain)
 
@@ -332,6 +336,17 @@ public struct PanelView: View {
           Text(copy.awakeBadge)
             .font(Typography.meta)
             .foregroundStyle(palette.inkTertiary)
+        }
+
+        // Bound beyond loopback and/or serving TLS: the one footer word with a
+        // security meaning, drawn from the flags the server was started with.
+        // One word, not two: the strip is 348 points wide.
+        if let network = copy.networkBadge(lan: snapshot.sharesOnLAN, tls: snapshot.secure) {
+          Text(network)
+            .font(Typography.meta)
+            .foregroundStyle(palette.inkTertiary)
+            .lineLimit(1)
+            .fixedSize()
         }
 
         Spacer(minLength: 8)

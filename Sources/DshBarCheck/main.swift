@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import DshBarKit
 import Foundation
 
@@ -127,6 +128,8 @@ func runChecks() -> Int32 {
     .failedExit: .failed,
     .failedWorkspace: .failed,
     .listeningHandoff: .listening,
+    .listeningLAN: .listening,
+    .failedFlags: .failed,
   ]
   for scene in DemoScene.allCases {
     checks.equal(Fixtures.snapshot(for: scene, copy: en).phase, expected[scene] ?? .failed, "\(scene) phase")
@@ -1212,9 +1215,14 @@ func runChecks() -> Int32 {
   let handoffSuite = "dev.dsh.bar.check.handoff.\(UUID().uuidString)"
   if let domain = UserDefaults(suiteName: handoffSuite) {
     checks.equal(HandoffStore.load(from: domain), nil, "nothing is remembered before a handoff")
-    let record = HandoffRecord(pid: 4326, port: 3099, startedAt: Date(timeIntervalSince1970: 1_700_000_000), launchURL: "http://127.0.0.1:3099/?token=x")
+    let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    let record = HandoffRecord(pid: 4326, port: 3099, startedAt: startedAt, launchURL: "http://127.0.0.1:3099/?token=x")
     HandoffStore.save(record, to: domain)
-    checks.equal(HandoffStore.load(from: domain), record, "a handoff record survives a relaunch")
+    checks.equal(
+      HandoffStore.load(from: domain),
+      HandoffRecord(pid: 4326, port: 3099, startedAt: startedAt, launchURL: "http://127.0.0.1:3099/?token=…"),
+      "a handoff record survives a relaunch, without its token"
+    )
     checks.equal(HandoffStore.load(from: domain)?.pid, 4326, "the record keeps the pid")
     checks.equal(HandoffStore.load(from: domain)?.port, 3099, "the record keeps the port")
 
@@ -1657,6 +1665,292 @@ func runChecks() -> Int32 {
     "a handed-off server holds no assertion"
   )
   checks.check(!Fixtures.snapshot(for: .stopped, copy: en).awake, "a stopped server is not awake")
+
+  // MARK: - 0.6.0 · token hygiene
+
+  let launchLine = "dsh web: http://127.0.0.1:3080/?token=s3cr3tAbC123"
+  let redactedLine = LogRedaction.redact(launchLine)
+  checks.equal(redactedLine, "dsh web: http://127.0.0.1:3080/?token=…", "the launch line loses its token")
+  checks.check(!redactedLine.contains("s3cr3tAbC123"), "the token value is gone")
+  checks.equal(LogRedaction.redact(redactedLine), redactedLine, "redaction is idempotent")
+  checks.equal(
+    LogRedaction.redact("?a=1&token=xyz&b=2"),
+    "?a=1&token=…&b=2",
+    "a token in the middle keeps the rest of the query"
+  )
+  checks.equal(LogRedaction.redact("TOKEN=abc"), "TOKEN=…", "the key is matched case-insensitively")
+  checks.equal(LogRedaction.redact("mytoken=abc"), "mytoken=abc", "a word ending in token is not a key")
+  checks.equal(LogRedaction.redact("token="), "token=", "an empty value has nothing to hide")
+  checks.equal(
+    LogRedaction.redact("(http://h:1/?token=abc)."),
+    "(http://h:1/?token=…).",
+    "punctuation after the URL survives"
+  )
+  checks.equal(
+    LogRedaction.redact("token=a token=b"),
+    "token=… token=…",
+    "every token on the line is masked"
+  )
+  checks.equal(LogRedaction.redact("no secret here"), "no secret here", "a clean line is untouched")
+  checks.equal(
+    LogRedaction.redactedURL("http://127.0.0.1:3080/?token=abc&profile=web"),
+    "http://127.0.0.1:3080/?token=…&profile=web",
+    "redactedURL keeps other parameters"
+  )
+  checks.equal(
+    LogRedaction.urlWithoutToken("http://127.0.0.1:3080/?token=abc&profile=web"),
+    "http://127.0.0.1:3080/?profile=web",
+    "the copyable link drops only the credential"
+  )
+  checks.equal(
+    LogRedaction.urlWithoutToken("http://127.0.0.1:3080/?token=abc"),
+    "http://127.0.0.1:3080/",
+    "a link with only a token becomes the bare address"
+  )
+  checks.check(LogRedaction.carriesToken("http://h/?token=a"), "a token is noticed")
+  checks.check(!LogRedaction.carriesToken("http://h/?profile=web"), "no token, nothing to notice")
+  checks.check(
+    !Fixtures.log().contains { $0.text.contains("{{SECRET_6xmk2p4v}}") },
+    "the reviewed fixture carries no token"
+  )
+  checks.check(
+    Fixtures.log().first?.text.contains("token=…") == true,
+    "the reviewed fixture shows the masked form"
+  )
+
+  // The handoff note is written to disk and read back on the next launch.
+  let tokenHandoffSuite = "dev.dsh.bar.check.handoff.\(UUID().uuidString)"
+  if let domain = UserDefaults(suiteName: tokenHandoffSuite) {
+    HandoffStore.save(
+      HandoffRecord(pid: 42, port: 3099, startedAt: Date(), launchURL: "http://127.0.0.1:3099/?token=abc"),
+      to: domain
+    )
+    let stored = HandoffStore.load(from: domain)
+    checks.check(stored?.launchURL?.contains("token=…") == true, "the handoff note stores a masked token")
+    checks.check(stored?.launchURL?.contains("abc") == false, "the handoff note stores no token value")
+    checks.check(stored?.pid == 42, "the handoff note still identifies the process")
+    domain.removePersistentDomain(forName: tokenHandoffSuite)
+  } else {
+    checks.check(false, "a throwaway defaults domain could not be created")
+  }
+
+  // MARK: - 0.6.0 · launch flags
+
+  let defaultsFlags = WebLaunchFlags.empty
+  checks.equal(
+    defaultsFlags.arguments(profile: "web", port: 3099),
+    ["--profile", "web", "--no-open", "--port", "3099"],
+    "default flags are exactly the 0.5.0 argv"
+  )
+  checks.equal(
+    defaultsFlags.arguments(profile: "web", port: 0),
+    ["--profile", "web", "--no-open"],
+    "an auto port sends no --port"
+  )
+  checks.check(defaultsFlags.isDefault, "empty flags are the default")
+  checks.check(!defaultsFlags.usesTLS, "no certificate, no TLS")
+  checks.check(!defaultsFlags.bindsBeyondLoopback, "no host, loopback only")
+
+  let lanFlags = WebLaunchFlags(
+    host: "192.168.1.10",
+    publicURL: "https://dsh.example.com/",
+    trustedHosts: ["dsh.example.com", "[::1]:8080"],
+    tlsCertPath: "/tmp/cert.pem",
+    tlsKeyPath: "/tmp/key.pem",
+    patches: ["/tmp/a.yml", "/tmp/b.yml"]
+  )
+  checks.equal(
+    lanFlags.arguments(profile: "web", port: 3080),
+    [
+      "--profile", "web", "--no-open", "--port", "3080",
+      "--host", "192.168.1.10",
+      "--public-url", "https://dsh.example.com/",
+      "--trusted-host", "dsh.example.com",
+      "--trusted-host", "[::1]:8080",
+      "--tls-cert", "/tmp/cert.pem",
+      "--tls-key", "/tmp/key.pem",
+      "--patch", "/tmp/a.yml",
+      "--patch", "/tmp/b.yml",
+    ],
+    "every flag reaches argv, in one order"
+  )
+  checks.check(lanFlags.usesTLS, "a certificate pair turns TLS on")
+  checks.check(lanFlags.bindsBeyondLoopback, "a LAN address is beyond loopback")
+  checks.check(!lanFlags.isDefault, "flags are not the default")
+
+  checks.equal(WebLaunchFlags.hostProblem(""), nil, "an empty host is not a problem")
+  checks.equal(WebLaunchFlags.hostProblem("127.0.0.1"), nil, "loopback is a literal")
+  checks.equal(WebLaunchFlags.hostProblem("192.168.1.10"), nil, "a LAN address is a literal")
+  checks.equal(WebLaunchFlags.hostProblem("::1"), nil, "an IPv6 loopback is a literal")
+  checks.equal(WebLaunchFlags.hostProblem("0.0.0.0"), .wildcardHost("0.0.0.0"), "wildcard v4 is refused")
+  checks.equal(WebLaunchFlags.hostProblem("::"), .wildcardHost("::"), "wildcard v6 is refused")
+  checks.equal(WebLaunchFlags.hostProblem("*"), .wildcardHost("*"), "star is refused")
+  checks.equal(
+    WebLaunchFlags.hostProblem("example.com"),
+    .invalidHost("example.com"),
+    "a host name is not an address"
+  )
+  checks.equal(
+    WebLaunchFlags.hostProblem("127.0.0.999"),
+    .invalidHost("127.0.0.999"),
+    "an impossible octet is refused"
+  )
+
+  checks.check(WebLaunchFlags.isLoopback("127.0.0.1"), "127.0.0.1 is loopback")
+  checks.check(WebLaunchFlags.isLoopback("127.9.9.9"), "the whole 127/8 is loopback")
+  checks.check(WebLaunchFlags.isLoopback("::1"), "::1 is loopback")
+  checks.check(WebLaunchFlags.isLoopback("localhost"), "localhost is loopback")
+  checks.check(!WebLaunchFlags.isLoopback("192.168.1.10"), "a LAN address is not loopback")
+
+  checks.check(WebLaunchFlags.isPublicURL("https://dsh.example.com/"), "https is a public URL")
+  checks.check(WebLaunchFlags.isPublicURL("http://10.0.0.2:8080"), "http is a public URL")
+  checks.check(!WebLaunchFlags.isPublicURL("dsh.example.com"), "a bare host is not a URL")
+  checks.check(!WebLaunchFlags.isPublicURL("ftp://dsh.example.com"), "another scheme is not a URL")
+  checks.check(WebLaunchFlags.isTrustedHost("dsh.example.com"), "a host is trusted")
+  checks.check(WebLaunchFlags.isTrustedHost("dsh.example.com:8080"), "host:port is trusted")
+  checks.check(WebLaunchFlags.isTrustedHost("[::1]:8080"), "a bracketed IPv6 authority is trusted")
+  checks.check(!WebLaunchFlags.isTrustedHost("https://dsh.example.com"), "a scheme is not an authority")
+  checks.check(!WebLaunchFlags.isTrustedHost("dsh.example.com/ui"), "a path is not an authority")
+  checks.check(!WebLaunchFlags.isTrustedHost("dsh.example.com:0"), "port 0 is not an authority")
+
+  let flagFiles: (String) -> Bool = { $0.hasPrefix("/tmp/ok") }
+  checks.equal(
+    WebLaunchFlags(host: "0.0.0.0").firstProblem(fileExists: flagFiles),
+    .wildcardHost("0.0.0.0"),
+    "a wildcard host is the first problem"
+  )
+  checks.equal(
+    WebLaunchFlags(tlsCertPath: "/tmp/ok.pem").firstProblem(fileExists: flagFiles),
+    .tlsNeedsBoth,
+    "one half of the pair is refused"
+  )
+  checks.equal(
+    WebLaunchFlags(tlsCertPath: "/tmp/ok.pem", tlsKeyPath: "/tmp/gone.pem")
+      .firstProblem(fileExists: flagFiles),
+    .missingFile(field: .tlsKey, path: "/tmp/gone.pem"),
+    "a missing key is named"
+  )
+  checks.equal(
+    WebLaunchFlags(patches: ["/tmp/ok.yml", "/tmp/gone.yml"]).firstProblem(fileExists: flagFiles),
+    .missingFile(field: .patch, path: "/tmp/gone.yml"),
+    "a missing patch is named"
+  )
+  checks.equal(
+    WebLaunchFlags(patches: [""]).firstProblem(fileExists: flagFiles),
+    .emptyPatch,
+    "an empty patch path is refused"
+  )
+  checks.check(
+    WebLaunchFlags(host: "example.com", publicURL: "nope").problems(fileExists: flagFiles).count == 2,
+    "each bad field reports once"
+  )
+  checks.check(
+    WebLaunchFlags(host: "0.0.0.0", publicURL: "nope").firstProblem(fileExists: flagFiles)?.field == .host,
+    "the first problem is the first row"
+  )
+
+  let flagsSuite = "dev.dsh.bar.check.flags.\(UUID().uuidString)"
+  if let domain = UserDefaults(suiteName: flagsSuite) {
+    let fresh = BarPreferences.load(from: domain)
+    checks.check(fresh.launchFlags.isDefault, "an upgrade sends no new flags")
+    checks.equal(fresh.trustedHosts, [], "no trusted hosts by default")
+    var saved = fresh
+    saved.launchHost = " 192.168.1.10 "
+    saved.publicURL = " https://dsh.example.com/ "
+    saved.trustedHosts = BarPreferences.normalizeTrustedHosts(["a.example, b.example  a.example"])
+    saved.tlsCertPath = "~/cert.pem"
+    saved.patchPaths = BarPreferences.normalizePaths(["/tmp/a.yml", "/tmp/a.yml"])
+    saved.save(to: domain)
+    let loaded = BarPreferences.load(from: domain)
+    checks.equal(loaded.launchHost, "192.168.1.10", "the bind host is trimmed")
+    checks.equal(loaded.publicURL, "https://dsh.example.com/", "the public URL is trimmed")
+    checks.equal(loaded.trustedHosts, ["a.example", "b.example"], "trusted hosts split and dedupe")
+    checks.equal(loaded.trustedHostsText, "a.example, b.example", "the field text joins them")
+    checks.check(loaded.tlsCertPath?.hasPrefix("/") == true, "the certificate path is expanded")
+    checks.check(loaded.tlsCertPath?.hasSuffix("/cert.pem") == true, "the certificate path is kept")
+    checks.equal(loaded.patchPaths.count, 1, "patch paths dedupe")
+    checks.equal(
+      loaded.replacing(port: 3099).launchHost,
+      "192.168.1.10",
+      "changing the port keeps the flags"
+    )
+    checks.check(!loaded.launchFlags.isDefault, "saved flags are not the default")
+    var cleared = loaded
+    cleared.setLaunchFlags(.empty)
+    checks.check(cleared.launchFlags.isDefault, "clearing the flags goes back to the 0.5.0 argv")
+    checks.equal(BarPreferences.normalizeHost("   "), nil, "a blank host is no host")
+    domain.removePersistentDomain(forName: flagsSuite)
+  } else {
+    checks.check(false, "a throwaway defaults domain could not be created")
+  }
+
+  let lanSnapshot = HarnessSnapshot(phase: .stopped, port: 3080, bindHost: "192.168.1.10")
+  checks.equal(lanSnapshot.address, "192.168.1.10:3080", "before a start the readout shows the bind address")
+  checks.check(lanSnapshot.sharesOnLAN, "a LAN bind is shared")
+  checks.check(
+    !HarnessSnapshot(phase: .stopped, bindHost: "127.0.0.1").sharesOnLAN,
+    "loopback is not shared"
+  )
+  checks.check(
+    !HarnessSnapshot(phase: .listening, host: "10.0.0.2").sharesOnLAN,
+    "no configured host, no badge"
+  )
+  checks.check(!HarnessSnapshot(phase: .listening).secure, "TLS is off unless told")
+  checks.equal(
+    HarnessSnapshot(phase: .listening, host: "192.168.1.10", port: 3080, bindHost: "192.168.1.10").address,
+    "192.168.1.10:3080",
+    "while serving the printed host wins"
+  )
+  let lanFixture = Fixtures.snapshot(for: .listeningLAN, copy: en)
+  checks.check(lanFixture.sharesOnLAN, "the LAN fixture shows the LAN word")
+  checks.check(lanFixture.secure, "the LAN fixture shows the TLS word")
+  checks.check(
+    !Fixtures.snapshot(for: .listening, copy: en).sharesOnLAN,
+    "the plain listening fixture is loopback"
+  )
+
+  let flagFailure = HarnessFailure(kind: .launchFlags(.wildcardHost("0.0.0.0")))
+  checks.check(flagFailure.recovery == nil, "a bad flag has no one-click repair")
+  checks.equal(
+    HarnessFailure(kind: .launchFlags(.missingFile(field: .tlsCert, path: "/tmp/c.pem"))).path,
+    "/tmp/c.pem",
+    "the failure names the missing file"
+  )
+  checks.equal(en.diagnosis(flagFailure).title, "A launch flag is unusable.", "en flag diagnosis title")
+  checks.check(en.diagnosis(flagFailure).body.contains("0.0.0.0"), "the diagnosis quotes the address")
+  checks.check(zh.diagnosis(flagFailure).title.contains("启动参数"), "zh flag diagnosis title")
+
+  checks.equal(en.tabLaunch, "Launch", "en launch tab")
+  checks.equal(zh.tabLaunch, "启动", "zh launch tab")
+  checks.equal(en.lanBadge, "LAN", "en LAN word")
+  checks.equal(zh.lanBadge, "局域网", "zh LAN word")
+  checks.equal(en.tlsBadge, "TLS", "en TLS word")
+  checks.equal(en.networkBadge(lan: true, tls: true), "LAN · TLS", "en combined network word")
+  checks.equal(zh.networkBadge(lan: true, tls: false), "局域网", "zh LAN word alone")
+  checks.equal(zh.networkBadge(lan: false, tls: true), "TLS", "zh TLS word alone")
+  checks.equal(zh.networkBadge(lan: false, tls: false), nil, "no flags, no word")
+  checks.equal(zh.copyLinkRedacted, "复制不含凭证的链接", "zh redacted link action")
+  checks.equal(en.copyLinkRedacted, "Copy link without the token", "en redacted link action")
+  checks.check(en.launchFlagProblem(.tlsNeedsBoth).contains("together"), "en pair problem is explained")
+  checks.check(zh.launchFlagProblem(.tlsNeedsBoth).contains("一起"), "zh pair problem is explained")
+  checks.check(
+    en.launchFlagProblem(.missingFile(field: .patch, path: "/tmp/x.yml")).contains("/tmp/x.yml"),
+    "a missing file is quoted"
+  )
+  checks.check(
+    zh.launchFlagProblem(.invalidPublicURL("nope")).contains("nope"),
+    "zh quotes the bad URL"
+  )
+
+  checks.equal(PortProbe.normalizedHost(""), "127.0.0.1", "an empty host probes loopback")
+  checks.equal(PortProbe.normalizedHost("localhost"), "127.0.0.1", "localhost probes loopback")
+  checks.equal(PortProbe.normalizedHost("192.168.1.10"), "192.168.1.10", "a literal passes through")
+  checks.check(PortProbe.numericAddress("127.0.0.1", port: 3080)?.family == AF_INET, "IPv4 resolves")
+  checks.check(PortProbe.numericAddress("::1", port: 3080)?.family == AF_INET6, "IPv6 resolves")
+  checks.check(
+    PortProbe.numericAddress("example.com", port: 3080) == nil,
+    "a host name does not resolve numerically"
+  )
 
   return checks.report()
 }

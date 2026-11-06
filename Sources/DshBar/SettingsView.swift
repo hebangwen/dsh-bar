@@ -15,6 +15,7 @@ extension DshHomeMode: Identifiable {
 /// sections is a list to read rather than a window to use.
 enum SettingsTab: String, Sendable, CaseIterable, Identifiable {
   case general
+  case launch
   case workspace
   case environment
   case behavior
@@ -24,6 +25,7 @@ enum SettingsTab: String, Sendable, CaseIterable, Identifiable {
   var symbol: String {
     switch self {
     case .general: return "gearshape"
+    case .launch: return "network"
     case .workspace: return "folder"
     case .environment: return "terminal"
     case .behavior: return "slider.horizontal.3"
@@ -33,11 +35,22 @@ enum SettingsTab: String, Sendable, CaseIterable, Identifiable {
   func title(_ copy: Copy) -> String {
     switch self {
     case .general: return copy.tabGeneral
+    case .launch: return copy.tabLaunch
     case .workspace: return copy.tabWorkspace
     case .environment: return copy.tabEnvironment
     case .behavior: return copy.tabBehavior
     }
   }
+}
+
+/// Which launch-flag field owns the keyboard, so focus leaving the group is one
+/// commit instead of five.
+private enum LaunchField: Hashable {
+  case host
+  case publicURL
+  case trustedHosts
+  case tlsCert
+  case tlsKey
 }
 
 /// The settings window: a tab strip on top, one pane below, labels right-aligned
@@ -59,8 +72,14 @@ struct SettingsView: View {
   @State private var profileText = ""
   @State private var workspaceText = ""
   @State private var dshHomeText = ""
+  @State private var launchHostText = ""
+  @State private var publicURLText = ""
+  @State private var trustedHostsText = ""
+  @State private var tlsCertText = ""
+  @State private var tlsKeyText = ""
   @FocusState private var workspaceFocused: Bool
   @FocusState private var dshHomeFocused: Bool
+  @FocusState private var launchFocus: LaunchField?
 
   @Environment(\.colorScheme) private var scheme
 
@@ -129,6 +148,12 @@ struct SettingsView: View {
         let expected = next.dshHome.map { LaunchTarget.shortPath($0) } ?? ""
         if dshHomeText != expected { dshHomeText = expected }
       }
+      mirrorLaunchFields(next)
+    }
+    .onChange(of: launchFocus) { _, focused in
+      // Same rule as the path fields: a half-typed address is not an address, so
+      // the value is committed when focus leaves the field, not per keystroke.
+      if focused == nil { commitLaunchFields() }
     }
   }
 
@@ -175,6 +200,7 @@ struct SettingsView: View {
   private var pane: some View {
     switch tab {
     case .general: generalPane
+    case .launch: launchPane
     case .workspace: workspacePane
     case .environment: environmentPane
     case .behavior: behaviorPane
@@ -280,6 +306,146 @@ struct SettingsView: View {
       }
       if case let .unavailable(reason) = model.launchAtLogin {
         note(reason)
+      }
+    }
+    .settingsPane(padding: SettingsMetrics.panePadding)
+  }
+
+  /// The fifth tab: the optional `dsh web` flags. Every field is blank by default,
+  /// so an untouched install launches exactly the argv 0.5.0 launched.
+  private var launchPane: some View {
+    VStack(alignment: .leading, spacing: SettingsMetrics.rowGap) {
+      row(copy.hostField) {
+        if isSnapshot {
+          snapshotField(launchHostText.isEmpty ? copy.hostPlaceholder : launchHostText, width: 180)
+        } else {
+          TextField(copy.hostPlaceholder, text: $launchHostText)
+            .textFieldStyle(.roundedBorder)
+            .font(valueFont)
+            .frame(width: 180)
+            .focused($launchFocus, equals: .host)
+            .onSubmit { commitLaunchFields() }
+        }
+        Spacer(minLength: 0)
+      }
+      note(
+        launchProblem(.host).map(copy.launchFlagProblem) ?? copy.hostNote,
+        tone: launchProblem(.host) == nil ? nil : palette.fail
+      )
+
+      row(copy.publicURLField) {
+        if isSnapshot {
+          snapshotField(publicURLText.isEmpty ? copy.publicURLPlaceholder : publicURLText, width: 240)
+        } else {
+          TextField(copy.publicURLPlaceholder, text: $publicURLText)
+            .textFieldStyle(.roundedBorder)
+            .font(valueFont)
+            .frame(width: 240)
+            .focused($launchFocus, equals: .publicURL)
+            .onSubmit { commitLaunchFields() }
+        }
+        Spacer(minLength: 0)
+      }
+      note(
+        launchProblem(.publicURL).map(copy.launchFlagProblem) ?? copy.publicURLNote,
+        tone: launchProblem(.publicURL) == nil ? nil : palette.fail
+      )
+
+      row(copy.trustedHostsField) {
+        if isSnapshot {
+          snapshotField(trustedHostsText.isEmpty ? "—" : trustedHostsText, width: 240)
+        } else {
+          TextField("dsh.example.com, [::1]:8080", text: $trustedHostsText)
+            .textFieldStyle(.roundedBorder)
+            .font(valueFont)
+            .frame(width: 240)
+            .focused($launchFocus, equals: .trustedHosts)
+            .onSubmit { commitLaunchFields() }
+        }
+        Spacer(minLength: 0)
+      }
+      note(
+        launchProblem(.trustedHost).map(copy.launchFlagProblem) ?? copy.trustedHostsNote,
+        tone: launchProblem(.trustedHost) == nil ? nil : palette.fail
+      )
+
+      row(copy.tlsCertField) {
+        if isSnapshot {
+          snapshotField(tlsCertText.isEmpty ? "—" : tlsCertText, width: 200)
+        } else {
+          TextField("", text: $tlsCertText)
+            .textFieldStyle(.roundedBorder)
+            .font(valueFont)
+            .frame(width: 200)
+            .focused($launchFocus, equals: .tlsCert)
+            .onSubmit { commitLaunchFields() }
+        }
+        Button(copy.chooseLink) { chooseTLSFile(.tlsCert) }
+          .controlSize(.small)
+        Button(copy.clearField) {
+          tlsCertText = ""
+          commitLaunchFields()
+        }
+        .controlSize(.small)
+        Spacer(minLength: 0)
+      }
+
+      row(copy.tlsKeyField) {
+        if isSnapshot {
+          snapshotField(tlsKeyText.isEmpty ? "—" : tlsKeyText, width: 200)
+        } else {
+          TextField("", text: $tlsKeyText)
+            .textFieldStyle(.roundedBorder)
+            .font(valueFont)
+            .frame(width: 200)
+            .focused($launchFocus, equals: .tlsKey)
+            .onSubmit { commitLaunchFields() }
+        }
+        Button(copy.chooseLink) { chooseTLSFile(.tlsKey) }
+          .controlSize(.small)
+        Button(copy.clearField) {
+          tlsKeyText = ""
+          commitLaunchFields()
+        }
+        .controlSize(.small)
+        Spacer(minLength: 0)
+      }
+      let tlsProblem = launchProblem(.tlsCert) ?? launchProblem(.tlsKey)
+      note(
+        tlsProblem.map(copy.launchFlagProblem) ?? copy.tlsNote,
+        tone: tlsProblem == nil ? nil : palette.fail
+      )
+
+      row(copy.patchField) {
+        VStack(alignment: .leading, spacing: 5) {
+          if model.preferences.patchPaths.isEmpty {
+            Text(copy.noPatches)
+              .font(.system(size: 10.5))
+              .foregroundStyle(.tertiary)
+          } else {
+            ForEach(model.preferences.patchPaths, id: \.self) { path in
+              HStack(spacing: 8) {
+                Text(LaunchTarget.shortPath(path))
+                  .font(valueFont)
+                  .lineLimit(1)
+                  .truncationMode(.middle)
+                  .help(path)
+                if !isSnapshot {
+                  Button(copy.removePatch) { model.removePatch(path) }
+                    .controlSize(.small)
+                }
+              }
+            }
+          }
+          if !isSnapshot {
+            Button(copy.addPatch) { choosePatches() }
+              .controlSize(.small)
+          }
+        }
+        Spacer(minLength: 0)
+      }
+      if let problem = launchProblem(.patch) {
+        note(copy.launchFlagProblem(problem), tone: palette.fail)
       }
     }
     .settingsPane(padding: SettingsMetrics.panePadding)
@@ -635,6 +801,77 @@ struct SettingsView: View {
     }
   }
 
+  // MARK: - Launch flags
+
+  private func launchProblem(_ field: WebLaunchFlags.Field) -> WebLaunchFlags.Problem? {
+    model.launchFlagProblems.first { $0.field == field }
+  }
+
+  /// The model is the source of truth; the fields only mirror it. A field that
+  /// currently has focus is left alone, because writing the stored value back into
+  /// a half-typed field is how a text field starts fighting the user.
+  private func mirrorLaunchFields(_ preferences: BarPreferences) {
+    if launchFocus != .host {
+      let expected = preferences.launchHost ?? ""
+      if launchHostText != expected { launchHostText = expected }
+    }
+    if launchFocus != .publicURL {
+      let expected = preferences.publicURL ?? ""
+      if publicURLText != expected { publicURLText = expected }
+    }
+    if launchFocus != .trustedHosts {
+      let expected = preferences.trustedHostsText
+      if trustedHostsText != expected { trustedHostsText = expected }
+    }
+    if launchFocus != .tlsCert {
+      let expected = preferences.tlsCertPath ?? ""
+      if tlsCertText != expected { tlsCertText = expected }
+    }
+    if launchFocus != .tlsKey {
+      let expected = preferences.tlsKeyPath ?? ""
+      if tlsKeyText != expected { tlsKeyText = expected }
+    }
+  }
+
+  private func commitLaunchFields() {
+    var next = model.preferences
+    next.launchHost = BarPreferences.normalizeHost(launchHostText)
+    next.publicURL = BarPreferences.normalizeURL(publicURLText)
+    next.trustedHosts = BarPreferences.normalizeTrustedHosts([trustedHostsText])
+    next.tlsCertPath = BarPreferences.normalizeFilePath(tlsCertText)
+    next.tlsKeyPath = BarPreferences.normalizeFilePath(tlsKeyText)
+    model.applyLaunchFlags(next.launchFlags)
+  }
+
+  private func chooseTLSFile(_ field: WebLaunchFlags.Field) {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = true
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = false
+    panel.message = field == .tlsKey ? copy.tlsKeyField : copy.tlsCertField
+    panel.prompt = copy.chooseLink
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    if field == .tlsKey {
+      tlsKeyText = url.path
+    } else {
+      tlsCertText = url.path
+    }
+    commitLaunchFields()
+  }
+
+  private func choosePatches() {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = true
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = true
+    panel.message = copy.patchField
+    panel.prompt = copy.addPatch
+    guard panel.runModal() == .OK else { return }
+    for url in panel.urls {
+      model.addPatch(url.path)
+    }
+  }
+
   // MARK: - Footer
 
   private var footer: some View {
@@ -709,6 +946,7 @@ struct SettingsView: View {
     portError = false
     workspaceText = model.preferences.workspacePath.map { LaunchTarget.shortPath($0) } ?? ""
     dshHomeText = model.preferences.dshHome.map { LaunchTarget.shortPath($0) } ?? ""
+    mirrorLaunchFields(model.preferences)
   }
 
   private func chooseBinary() {

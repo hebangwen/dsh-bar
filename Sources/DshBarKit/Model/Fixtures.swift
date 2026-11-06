@@ -17,6 +17,10 @@ public enum DemoScene: String, Sendable, CaseIterable {
   case failedWorkspace
   /// M3: a server this app started in an earlier run and kept alive.
   case listeningHandoff
+  /// 0.6.0: bound to a LAN address with TLS on, so the footer carries both words.
+  case listeningLAN
+  /// 0.6.0: a launch refused before spawn because one flag cannot be sent.
+  case failedFlags
 
   public var title: String {
     switch self {
@@ -30,17 +34,25 @@ public enum DemoScene: String, Sendable, CaseIterable {
     case .failedExit: return "failed-exit"
     case .failedWorkspace: return "failed-workspace"
     case .listeningHandoff: return "listening-handoff"
+    case .listeningLAN: return "listening-lan-tls"
+    case .failedFlags: return "failed-flags"
     }
   }
 }
 
 public enum Fixtures {
   /// Real dsh output, as captured: one stdout line carrying the launch URL,
-  /// surrounded by stderr noise from plugins. The token line is long on purpose:
-  /// the well has to truncate without losing the host.
+  /// surrounded by stderr noise from plugins. The token is already redacted here,
+  /// because that is what the panel is handed: the buffer and the log file never
+  /// see the value.
   public static func log(port: Int = 3080) -> [LogLine] {
     [
-      LogLine(id: 0, time: "22:04:09", text: "dsh web: http://127.0.0.1:\(port)/?token={{SECRET_6xmk2p4v}}", emphasized: true),
+      LogLine(
+        id: 0,
+        time: "22:04:09",
+        text: "dsh web: http://127.0.0.1:\(port)/?token=\(LogRedaction.placeholder)",
+        emphasized: true
+      ),
       LogLine(
         id: 1,
         time: "22:04:10",
@@ -164,6 +176,36 @@ public enum Fixtures {
         uptime: nil,
         log: [],
         handoff: true
+      )
+    case .failedFlags:
+      return HarnessSnapshot(
+        phase: .failed,
+        port: port,
+        failure: HarnessFailure(
+          kind: .launchFlags(.wildcardHost("0.0.0.0")),
+          detail: "0.0.0.0 is a wildcard"
+        ),
+        log: [
+          LogLine(
+            id: 0,
+            time: "22:04:09",
+            text: "dsh bar: not spawning: 0.0.0.0 is a wildcard; dsh takes one concrete local address",
+            emphasized: true,
+            stream: .err
+          )
+        ]
+      )
+    case .listeningLAN:
+      return HarnessSnapshot(
+        phase: .listening,
+        host: "192.168.1.10",
+        port: port,
+        owner: .dshBar,
+        uptime: 761,
+        log: [],
+        awake: true,
+        bindHost: "192.168.1.10",
+        secure: true
       )
     }
   }

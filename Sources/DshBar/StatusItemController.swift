@@ -307,6 +307,28 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     menu.addItem(sleep)
     menu.addItem(.separator())
 
+    // The panel's copy button hands out the working link, token and all. This is
+    // the other half of that decision: the same address without the credential,
+    // for pasting somewhere the reader does not control.
+    let link = NSMenuItem(
+      title: model.copy.copyLink,
+      action: #selector(copyAuthenticatedLink),
+      keyEquivalent: ""
+    )
+    link.target = self
+    link.isEnabled = model.launchURL != nil
+    menu.addItem(link)
+
+    let publicLink = NSMenuItem(
+      title: model.copy.copyLinkRedacted,
+      action: #selector(copyRedactedLink),
+      keyEquivalent: ""
+    )
+    publicLink.target = self
+    publicLink.isEnabled = model.snapshot.phase == .listening
+    menu.addItem(publicLink)
+    menu.addItem(.separator())
+
     let settings = NSMenuItem(title: model.copy.settings, action: #selector(openSettings), keyEquivalent: ",")
     settings.target = self
     menu.addItem(settings)
@@ -329,6 +351,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     case .failed: return model.snapshot.failure?.port == nil ? .failedExit : .failedPort
     case .listening: return model.snapshot.owner == .external ? .listeningExternal : .listening
     }
+  }
+
+  @objc private func copyAuthenticatedLink() {
+    model.copyLink()
+  }
+
+  @objc private func copyRedactedLink() {
+    model.copyLink(redacted: true)
   }
 
   @objc private func selectScene(_ sender: NSMenuItem) {

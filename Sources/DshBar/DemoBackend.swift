@@ -20,6 +20,9 @@ final class DemoBackend: HarnessBackend {
   /// The fixture build has no caffeinate of its own; it mirrors the rule so the
   /// footer marker and the settings row can be reviewed without a real server.
   private var sleepPolicy: SleepPolicy = .default
+  /// The fixture build has no argv either; it mirrors the flags so the footer's
+  /// LAN/TLS words can be reviewed without a real server.
+  private var flags: WebLaunchFlags = .empty
   private var pending: DispatchWorkItem?
 
   init(language: UILanguage, port: Int, profile: String) {
@@ -103,6 +106,7 @@ final class DemoBackend: HarnessBackend {
   func update(_ preferences: BarPreferences) {
     port = preferences.port
     profile = preferences.profile
+    flags = preferences.launchFlags
     if sleepPolicy != preferences.sleepPolicy {
       sleepPolicy = preferences.sleepPolicy
       var next = snapshot
@@ -181,6 +185,8 @@ final class DemoBackend: HarnessBackend {
   private func publish(_ scene: HarnessSnapshot) {
     var out = scene
     out.awake = sleepPolicy.isEnabled && out.phase == .listening && out.owner == .dshBar
+    if out.bindHost == nil { out.bindHost = flags.host }
+    if flags.usesTLS { out.secure = true }
     snapshot = out
     launchURL = out.phase == .listening && out.owner == .dshBar && out.hasLaunchURL
       ? "http://\(out.address)/?token=demo"

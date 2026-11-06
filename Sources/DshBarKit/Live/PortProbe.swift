@@ -42,34 +42,31 @@ public enum PortProbe {
   }
 
   /// Blocking probe on the calling thread; call it off the main actor.
+  ///
+  /// `host` is the address the server is bound to, which is no longer always
+  /// loopback: `--host` can put dsh on one local interface, and probing the wrong
+  /// address would report "free" for a port that is serving. Only numeric literals
+  /// are probed (dsh refuses host names); anything unparsable is treated as "not
+  /// ours to judge" and reported free, the same answer the loopback-only version
+  /// gave for a remote host.
   public static func probe(
     host: String = "127.0.0.1",
     port: Int,
     timeout: TimeInterval = 0.3
   ) -> PortState {
     guard (1...65535).contains(port) else { return .free }
-    guard host == "127.0.0.1" || host == "localhost" || host == "0.0.0.0" else {
-      // Only loopback is probed; a remote host is not this app's business.
-      return .free
-    }
+    let target = normalizedHost(host)
+    guard let address = numericAddress(target, port: port) else { return .free }
 
-    let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+    let descriptor = socket(address.family, SOCK_STREAM, address.proto)
     guard descriptor >= 0 else { return .free }
     defer { close(descriptor) }
 
     let flags = fcntl(descriptor, F_GETFL, 0)
     _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
 
-    var address = sockaddr_in()
-    address.sin_family = sa_family_t(AF_INET)
-    address.sin_port = in_port_t(UInt16(port).bigEndian)
-    guard inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1 else { return .free }
-
-    let length = socklen_t(MemoryLayout<sockaddr_in>.size)
-    let connected = withUnsafePointer(to: &address) { pointer in
-      pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
-        connect(descriptor, socketAddress, length)
-      }
+    let connected = address.withSockAddr { pointer, length in
+      connect(descriptor, pointer, length)
     }
 
     if connected != 0 {
@@ -88,7 +85,8 @@ public enum PortProbe {
       guard error == 0 else { return .other }
     }
 
-    let request = "GET / HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nConnection: close\r\nUser-Agent: dsh-bar\r\n\r\n"
+    let authority = target.contains(":") ? "[\(target)]:\(port)" : "\(target):\(port)"
+    let request = "GET / HTTP/1.1\r\nHost: \(authority)\r\nConnection: close\r\nUser-Agent: dsh-bar\r\n\r\n"
     let bytes = Array(request.utf8)
     var sent = 0
     while sent < bytes.count {
@@ -123,6 +121,55 @@ public enum PortProbe {
     }
     let response = splitResponse(text)
     return classify(statusCode: response.status, bodyHead: response.body)
+  }
+
+  /// `localhost` is the one name the app accepts; dsh's own flag takes literals.
+  public static func normalizedHost(_ host: String) -> String {
+    let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty || trimmed == "localhost" { return "127.0.0.1" }
+    return trimmed
+  }
+
+  /// A resolved numeric address plus the family and protocol a socket needs.
+  public struct Address {
+    public var family: Int32
+    public var proto: Int32
+    var storage: sockaddr_storage
+    var length: socklen_t
+
+    func withSockAddr<T>(_ body: (UnsafePointer<sockaddr>, socklen_t) -> T) -> T {
+      var copy = storage
+      return withUnsafePointer(to: &copy) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { body($0, length) }
+      }
+    }
+  }
+
+  /// `getaddrinfo` with `AI_NUMERICHOST`: one call covers IPv4 and IPv6 without
+  /// the app hand-rolling two sockaddr layouts.
+  public static func numericAddress(_ host: String, port: Int) -> Address? {
+    var hints = addrinfo()
+    hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV
+    hints.ai_family = AF_UNSPEC
+    hints.ai_socktype = SOCK_STREAM
+    var result: UnsafeMutablePointer<addrinfo>?
+    guard getaddrinfo(host, String(port), &hints, &result) == 0, let list = result else {
+      return nil
+    }
+    defer { freeaddrinfo(list) }
+    guard let first = list.pointee.ai_addr, list.pointee.ai_addrlen > 0 else { return nil }
+    var storage = sockaddr_storage()
+    let length = min(socklen_t(MemoryLayout<sockaddr_storage>.size), list.pointee.ai_addrlen)
+    withUnsafeMutableBytes(of: &storage) { destination in
+      let source = UnsafeRawPointer(first)
+      destination.copyMemory(from: UnsafeRawBufferPointer(start: source, count: Int(length)))
+    }
+    return Address(
+      family: list.pointee.ai_family,
+      proto: list.pointee.ai_protocol,
+      storage: storage,
+      length: length
+    )
   }
 
   /// `poll` returning > 0 means the socket is ready for one of `events`; a

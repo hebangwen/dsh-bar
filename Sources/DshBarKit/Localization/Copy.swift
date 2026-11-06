@@ -61,6 +61,8 @@ public struct Copy: Sendable {
 
   public var tabBehavior: String { zh("行为", "Behavior") }
 
+  public var tabLaunch: String { zh("启动", "Launch") }
+
   public var port: String { zh("端口", "port") }
 
   public var profile: String { "profile" }
@@ -439,6 +441,143 @@ public struct Copy: Sendable {
     }
   }
 
+  // MARK: - Launch flags
+
+  /// The fifth tab. Everything here is optional: an untouched install sends the
+  /// same argv 0.5.0 sent.
+  public var launchSection: String { zh("启动参数", "Launch flags") }
+
+
+  public var hostField: String { zh("绑定地址", "Bind address") }
+
+  public var hostPlaceholder: String { "127.0.0.1" }
+
+  public var hostNote: String {
+    zh(
+      "留空只监听本机。填一个本机地址（例如 192.168.1.10）可让同网段的设备访问；通配地址和主机名 dsh 不接受。",
+      "Empty listens on this machine only. A local address (192.168.1.10) lets devices on the same network in; dsh refuses wildcards and host names."
+    )
+  }
+
+  public var publicURLField: String { zh("公开地址", "Public URL") }
+
+  public var publicURLPlaceholder: String { "https://dsh.example.com/" }
+
+  public var publicURLNote: String {
+    zh(
+      "反向代理或隧道后面的外部地址；只影响打印和打开的链接，不授予信任。",
+      "The outside address behind a proxy or tunnel; it only changes the printed and opened link, and grants no trust."
+    )
+  }
+
+  public var trustedHostsField: String { zh("信任主机", "Trusted hosts") }
+
+  public var trustedHostsNote: String {
+    zh(
+      "额外允许通过 /api 浏览器信任栅栏的 authority（host 或 host:port），逗号分隔。",
+      "Extra authorities the /api browser-trust fence accepts (host or host:port), comma separated."
+    )
+  }
+
+  public var tlsCertField: String { zh("TLS 证书", "TLS cert") }
+
+  public var tlsKeyField: String { zh("TLS 私钥", "TLS key") }
+
+  public var tlsNote: String {
+    zh(
+      "证书与私钥必须成对；开启后只能用 https 打开，dsh bar 也不再能识别端口上的外部实例。",
+      "The certificate and key must be a pair. With them on the URL is https only, and dsh bar can no longer identify an external instance on the port."
+    )
+  }
+
+  public var patchField: String { zh("附加 patch", "Extra patches") }
+
+
+  public var addPatch: String { zh("添加…", "Add…") }
+
+  public var removePatch: String { zh("移除", "Remove") }
+
+  public var clearField: String { zh("清除", "Clear") }
+
+  public var noPatches: String { zh("没有附加 patch", "No extra patches") }
+
+  /// One sentence per rejected flag, said next to the field that caused it and
+  /// reused by the failed-launch diagnosis.
+  public func launchFlagProblem(_ problem: WebLaunchFlags.Problem) -> String {
+    switch problem {
+    case .wildcardHost(let host):
+      return zh(
+        "「\(host)」是通配地址。dsh 只接受一个具体的本机地址，填 192.168.x.x 这样的地址。",
+        "「\(host)」 is a wildcard. dsh takes one concrete local address, such as 192.168.x.x."
+      )
+    case .invalidHost(let host):
+      return zh(
+        "「\(host)」不是 IPv4 / IPv6 地址。",
+        "「\(host)」 is not an IPv4 or IPv6 address."
+      )
+    case .invalidPublicURL(let url):
+      return zh(
+        "「\(url)」不是 http(s) 地址。",
+        "「\(url)」 is not an http(s) URL."
+      )
+    case .invalidTrustedHost(let host):
+      return zh(
+        "「\(host)」不是 host 或 host:port。",
+        "「\(host)」 is not a host or host:port."
+      )
+    case .tlsNeedsBoth:
+      return zh(
+        "证书和私钥必须一起填：只填一个 dsh 会直接退出。",
+        "The certificate and key go together: one without the other makes dsh exit."
+      )
+    case .missingFile(let field, let path):
+      let label: String
+      switch field {
+      case .tlsCert: label = zh("证书", "certificate")
+      case .tlsKey: label = zh("私钥", "key")
+      case .patch: label = "patch"
+      default: label = zh("文件", "file")
+      }
+      return zh("找不到\(label)：\(path)", "The \(label) is missing: \(path)")
+    case .emptyPatch:
+      return zh("patch 路径是空的。", "A patch path is empty.")
+    }
+  }
+
+  /// Footer words, two characters like `防休眠`: a fact about this server, not a
+  /// control.
+  public var lanBadge: String { zh("局域网", "LAN") }
+
+  public var tlsBadge: String { "TLS" }
+
+  /// One footer word instead of two: the strip is 348 points wide and already
+  /// carries port, profile, the awake word and Quit.
+  public func networkBadge(lan: Bool, tls: Bool) -> String? {
+    switch (lan, tls) {
+    case (true, true): return "\(lanBadge) · \(tlsBadge)"
+    case (true, false): return lanBadge
+    case (false, true): return tlsBadge
+    case (false, false): return nil
+    }
+  }
+
+  // MARK: - Token hygiene
+
+  public var copyLinkRedacted: String {
+    zh("复制不含凭证的链接", "Copy link without the token")
+  }
+
+  public var copyLinkHelp: String {
+    zh(
+      "复制的是带 token 的地址；右键菜单里可以复制不含凭证的那一份。",
+      "Copies the URL with its token; the right-click menu has the version without one."
+    )
+  }
+
+  public var tokenRedactedNote: String {
+    zh("日志里的 token 已打码。", "Tokens are masked in the log.")
+  }
+
   // MARK: - Folder access
 
   /// `~/Documents` is TCC-protected; dsh's default workspace lives inside it, so
@@ -564,6 +703,14 @@ public struct Copy: Sendable {
         zh(
           "设置里指定的 DSH_HOME 指向 \(path)，但它不是文件夹，dsh bar 也不会替你覆盖它。点「改回默认」，跟随登录 shell 的 DSH_HOME。",
           "The DSH_HOME in Settings points at \(path), which is not a folder — and dsh bar will not overwrite it. Press Use defaults to follow the login shell's DSH_HOME again."
+        )
+      )
+    case .launchFlags(let problem):
+      return (
+        zh("启动参数不可用。", "A launch flag is unusable."),
+        zh(
+          "\(launchFlagProblem(problem))在设置 › 启动里改好，再按启动。",
+          "\(launchFlagProblem(problem)) Fix it under Settings › Launch, then press Start again."
         )
       )
     case .binaryMissing:

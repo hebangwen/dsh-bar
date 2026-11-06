@@ -61,8 +61,12 @@ public enum HandoffStore {
     return try? JSONDecoder().decode(HandoffRecord.self, from: data)
   }
 
+  /// The note outlives the run, so it is stored without the launch token: nothing
+  /// reads the URL back, and a bearer credential at rest is what 0.6.0 removed.
   public static func save(_ record: HandoffRecord, to defaults: UserDefaults = .standard) {
-    guard let data = try? JSONEncoder().encode(record) else { return }
+    var safe = record
+    safe.launchURL = record.launchURL.map(LogRedaction.redactedURL)
+    guard let data = try? JSONEncoder().encode(safe) else { return }
     defaults.set(data, forKey: HandoffRecord.key)
   }
 

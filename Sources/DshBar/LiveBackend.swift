@@ -38,6 +38,11 @@ final class LiveBackend: HarnessBackend {
   /// `DSHBAR_SLEEP_POLICY` wins over the preference, for scripted runs.
   private let forcedSleepPolicy = SleepPolicy.forced(from: ProcessInfo.processInfo.environment)
 
+  /// The flags the running child was actually started with. The panel draws this
+  /// while listening, so changing Settings mid-run cannot make the readout claim an
+  /// address the process is not on.
+  private var launchedFlags: WebLaunchFlags?
+
   private var watchTimer: Timer?
   private var readyTimer: Timer?
   private var stopTimer: Timer?
@@ -141,8 +146,9 @@ final class LiveBackend: HarnessBackend {
     }
     let port = state.snapshot.port
     guard (1...65535).contains(port) else { return }
+    let host = probeHost
     probeQueue.async { [weak self] in
-      let portState = PortProbe.probe(port: port)
+      let portState = PortProbe.probe(host: host, port: port)
       // The process table and the port are both read here, off the main thread: the
       // handoff question is "is the pid in my note still the dsh on this port?".
       var verdict: HandoffVerdict = .noRecord
@@ -235,6 +241,11 @@ final class LiveBackend: HarnessBackend {
     syncSleepGuard()
     state.snapshot.log = log.lines
     state.snapshot.awake = sleepGuard.status.isAsserting
+    // The footer's LAN/TLS words and the readout's address describe the process,
+    // not the settings page: while serving, the flags it was spawned with win.
+    let flags = effectiveFlags
+    state.snapshot.bindHost = flags.host
+    state.snapshot.secure = flags.usesTLS
     onSnapshot?(state.snapshot)
   }
 
@@ -242,6 +253,18 @@ final class LiveBackend: HarnessBackend {
   ///
   /// The pid matters: `caffeinate -w` ties the assertion to that process, so a dsh
   /// that dies takes the assertion with it even if this app never gets to react.
+  private var effectiveFlags: WebLaunchFlags {
+    if state.snapshot.phase == .listening, let launchedFlags { return launchedFlags }
+    return preferences.launchFlags
+  }
+
+  /// Where the port probe should look: the bind address when one is configured,
+  /// loopback otherwise. A server bound to one LAN interface does not answer on
+  /// 127.0.0.1, so probing the wrong address would report a busy port as free.
+  private var probeHost: String {
+    effectiveFlags.host ?? "127.0.0.1"
+  }
+
   /// Called after every dispatch, which includes the once-a-second uptime tick —
   /// `SleepGuardPlan` returns `noop` in the steady state, so that costs a lock and
   /// two comparisons.
@@ -261,9 +284,10 @@ final class LiveBackend: HarnessBackend {
       writer.separator(port: state.snapshot.port, profile: state.snapshot.profile)
 
     case .probePort(let port):
+      let host = probeHost
       probeQueue.async { [weak self] in
         guard let self else { return }
-        let portState = PortProbe.probe(port: port)
+        let portState = PortProbe.probe(host: host, port: port)
         DispatchQueue.main.async {
           MainActor.assumeIsolated {
             self.dispatch(.portChecked(portState, port: port))
@@ -319,10 +343,19 @@ final class LiveBackend: HarnessBackend {
       return
     }
 
-    var arguments = ["--profile", state.snapshot.profile, "--no-open"]
-    if port != 0 {
-      arguments.append(contentsOf: ["--port", "\(port)"])
+    // Optional flags are validated with the same value type Settings uses, so a
+    // wildcard host or a certificate that moved fails here with a sentence instead
+    // of inside dsh thirty seconds later.
+    let flags = preferences.launchFlags
+    if let problem = flags.firstProblem() {
+      let detail = Copy(language: language).launchFlagProblem(problem)
+      failStart(
+        HarnessFailure(kind: .launchFlags(problem), detail: detail),
+        note: "not spawning: \(detail)"
+      )
+      return
     }
+    let arguments = flags.arguments(profile: state.snapshot.profile, port: port)
 
     // The two launch paths are checked before anything is spawned: `posix_spawn`
     // would otherwise fail with a chdir error that reads like a broken binary.
@@ -417,7 +450,11 @@ final class LiveBackend: HarnessBackend {
         workingDirectory: target.workingDirectory
       )
       self.child = child
+      self.launchedFlags = flags
       writer.note("spawned \(detection.path) \(arguments.joined(separator: " ")) pid=\(child.pid)")
+      if !flags.isDefault {
+        writer.note("launch flags: host \(flags.host ?? "dsh default") · tls \(flags.usesTLS ? "on" : "off") · patches \(flags.patches.count)")
+      }
 
       child.onLine = { [weak self] stream, text in
         MainActor.assumeIsolated {
@@ -431,6 +468,7 @@ final class LiveBackend: HarnessBackend {
         MainActor.assumeIsolated {
           guard let self else { return }
           self.child = nil
+          self.launchedFlags = nil
           self.stopTimer?.invalidate()
           self.stopTimer = nil
           self.killTimer?.invalidate()
@@ -534,8 +572,11 @@ final class LiveBackend: HarnessBackend {
   // MARK: - Output
 
   private func append(line: String, stream: LogStream) {
-    log.append(line, stream: stream)
-    writer.write(line, stream: stream)
+    // One redaction point for both consumers: the four lines the panel shows and
+    // the file on disk. `LaunchOutput` already read the raw line for its token.
+    let safe = LogRedaction.redact(line)
+    log.append(safe, stream: stream)
+    writer.write(safe, stream: stream)
   }
 
   // MARK: - Environment
@@ -746,6 +787,8 @@ final class LiveBackend: HarnessBackend {
       writer.note("handoff skipped: no managed server is listening")
       return
     }
+    // `HandoffStore.save` masks the token before it writes: the note outlives the
+    // run, and a bearer credential at rest is what 0.6.0 removed.
     let record = HandoffRecord(
       pid: child.pid,
       port: state.snapshot.port,
@@ -799,6 +842,9 @@ final class LogFileWriter: @unchecked Sendable {
       FileManager.default.createFile(atPath: url.path, contents: nil)
     }
     rotateIfNeeded()
+    // A 0.5.0 log keeps every launch token it ever saw; the first launch on this
+    // build rewrites the file (and its rotated sibling) with the values masked.
+    scrubExistingTokens()
   }
 
   deinit {
@@ -810,11 +856,28 @@ final class LogFileWriter: @unchecked Sendable {
   }
 
   func note(_ text: String) {
-    append("\(stamp())  [bar] \(text)\n")
+    append("\(stamp())  [bar] \(LogRedaction.redact(text))\n")
   }
 
   func write(_ text: String, stream: LogStream) {
-    append("\(LogBuffer.clock())  [\(stream.rawValue)] \(text)\n")
+    append("\(LogBuffer.clock())  [\(stream.rawValue)] \(LogRedaction.redact(text))\n")
+  }
+
+  /// Mask tokens that an earlier build wrote. Idempotent: a clean file is left
+  /// untouched, so this is one read per launch, not a rewrite per launch.
+  private func scrubExistingTokens() {
+    for candidate in [url, url.appendingPathExtension("1")] {
+      guard
+        let data = try? Data(contentsOf: candidate),
+        let text = String(data: data, encoding: .utf8)
+      else { continue }
+      let cleaned = LogRedaction.redact(text)
+      guard cleaned != text else { continue }
+      try? handle?.close()
+      handle = nil
+      try? Data(cleaned.utf8).write(to: candidate, options: .atomic)
+      written = cleaned.utf8.count
+    }
   }
 
   private func append(_ text: String) {

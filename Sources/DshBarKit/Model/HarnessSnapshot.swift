@@ -136,6 +136,10 @@ public struct HarnessSnapshot: Sendable, Equatable {
   /// left alive on purpose. It changes the explanation, never the actions: it is
   /// still an external process with no token.
   public var handoff: Bool
+  /// True only while a caffeinate process is actually holding the idle-sleep
+  /// assertion for this server. The preference is not this flag: the panel draws
+  /// the fact, and the fact can be absent (tool missing, guard died).
+  public var awake: Bool
 
   public init(
     phase: HarnessPhase = .stopped,
@@ -149,7 +153,8 @@ public struct HarnessSnapshot: Sendable, Equatable {
     failure: HarnessFailure? = nil,
     log: [LogLine] = [],
     busy: Bool = false,
-    handoff: Bool = false
+    handoff: Bool = false,
+    awake: Bool = false
   ) {
     self.phase = phase
     self.host = host
@@ -163,6 +168,7 @@ public struct HarnessSnapshot: Sendable, Equatable {
     self.log = log
     self.busy = busy
     self.handoff = handoff
+    self.awake = awake
   }
 
   public var address: String { "\(host):\(port)" }

@@ -14,6 +14,10 @@ enum Smoke {
   static func main() {
     let arguments = CommandLine.arguments
     let requested = value(for: "--port", in: arguments).flatMap(Int.init) ?? 3099
+    // `--sleep` runs the power-assertion half; `--sleep off` only proves a disabled
+    // policy stays silent.
+    let sleepRun = arguments.contains("--sleep")
+    let sleepWanted = (value(for: "--sleep", in: arguments) ?? "on") != "off"
     guard requested != 3080, (1...65535).contains(requested) else {
       print("refusing port \(requested): use something other than 3080, e.g. 3099")
       exit(1)
@@ -68,6 +72,12 @@ enum Smoke {
       exit(1)
     }
     print("✓ port \(requested) is free")
+
+    // Armed after the spawn, asserted while the server is up, and expected to
+    // disappear on its own when the server stops.
+    let sleepGuard: SleepGuard? = sleepRun ? SleepGuard() : nil
+    sleepGuard?.onEvent = { print("  · sleep: \($0)") }
+    var pendingSleepStop = false
 
     var report: LaunchReport?
     var exitCode: Int32?
@@ -129,6 +139,41 @@ enum Smoke {
       "the token URL is accepted (\(authenticated.status))"
     )
 
+    if let sleepGuard {
+      // Negative first: a disabled policy must not leave anything behind.
+      sleepGuard.reconcile(policy: .off, watching: child.pid)
+      _ = wait(seconds: 0.4) { !sleepGuard.status.isAsserting }
+      check(!sleepGuard.status.isAsserting, "a disabled policy holds no assertion")
+      check(
+        caffeinateAssertions(for: child.pid).isEmpty,
+        "a disabled policy leaves nothing in pmset"
+      )
+
+      // `--sleep off` stops the sleep half here; the rest is the normal run.
+      if sleepWanted {
+        sleepGuard.reconcile(policy: .whileListening, watching: child.pid)
+        check(
+          wait(seconds: 2.0) { sleepGuard.status.isAsserting },
+          "the guard reports an assertion for pid \(child.pid)"
+        )
+        let listing = assertionsListing()
+        let held = caffeinateAssertions(in: listing, for: child.pid)
+        check(held.count == 1, "pmset lists exactly one caffeinate assertion for the dsh pid")
+        check(
+          held.first?.kind == SleepAssertion.Kind.idleSystem,
+          "the assertion prevents idle system sleep"
+        )
+        check(
+          held.allSatisfy { $0.kind != SleepAssertion.Kind.idleDisplay },
+          "the assertion leaves display sleep alone, so the screen can still turn off"
+        )
+        check(held.first?.watchedPID == Int(child.pid), "the assertion names the dsh pid")
+        // The real claim behind `-w`: the tool goes away with the server, without
+        // this app doing anything.
+        pendingSleepStop = true
+      }
+    }
+
     // The "quit and keep it running" claim, checked against the real process the
     // same way the next launch checks it: pid alive, command line is a dsh, port
     // answers with the fence. No record is written here — this is the verifier.
@@ -152,6 +197,18 @@ enum Smoke {
       RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
     }
     check(exitCode != nil, "the server exited after SIGTERM")
+
+    if let sleepGuard, pendingSleepStop {
+      check(
+        wait(seconds: 3.0) { !sleepGuard.status.isAsserting },
+        "the guard stops asserting once the dsh pid is gone (\(sleepGuard.status))"
+      )
+      check(
+        caffeinateAssertions(for: child.pid).isEmpty,
+        "caffeinate exited by itself; nothing is left in pmset"
+      )
+      sleepGuard.release()
+    }
     if exitCode == nil {
       child.kill()
       _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.5))
@@ -262,6 +319,47 @@ enum Smoke {
   }
 
   // MARK: - Helpers
+
+  /// `pmset -g assertions`, as text: the only place the claim "the display may
+  /// sleep" can be checked from outside the app.
+  private static func assertionsListing() -> String {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+    task.arguments = ["-g", "assertions"]
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    task.standardError = FileHandle.nullDevice
+    do {
+      try task.run()
+    } catch {
+      return ""
+    }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    task.waitUntilExit()
+    return String(decoding: data, as: UTF8.self)
+  }
+
+  private static func caffeinateAssertions(in listing: String, for pid: pid_t) -> [SleepAssertion] {
+    SleepAssertion.caffeinateAssertions(in: listing).filter { $0.watchedPID == Int(pid) }
+  }
+
+  /// Only this run's assertions: another caffeinate on the machine is not this
+  /// test's business.
+  private static func caffeinateAssertions(for pid: pid_t) -> [SleepAssertion] {
+    caffeinateAssertions(in: assertionsListing(), for: pid)
+  }
+
+  /// Pump the run loop while waiting: the guard publishes its status on the main
+  /// queue, so a blocking sleep would never see it.
+  @discardableResult
+  private static func wait(seconds: TimeInterval, until condition: () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+      if condition() { return true }
+      RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    return condition()
+  }
 
   private static func value(for flag: String, in arguments: [String]) -> String? {
     guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else {

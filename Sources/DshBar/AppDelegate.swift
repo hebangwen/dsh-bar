@@ -114,6 +114,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     case .stopManaged:
       model.shutdown()
     case .keepRunning:
+      // `prepareHandoff` releases the idle-sleep assertion on the way out: keeping
+      // the server is a server decision, not a license to change the machine's
+      // power behaviour after dsh bar is gone.
       model.keepRunning()
     case .ask:
       quitKeepsServer ? model.keepRunning() : model.shutdown()

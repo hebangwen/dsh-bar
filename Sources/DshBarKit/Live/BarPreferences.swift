@@ -31,6 +31,8 @@ public struct BarPreferences: Sendable, Equatable {
   public var quitBehavior: QuitBehavior
   /// The global chord that shows the panel.
   public var hotKey: HotKeyChoice
+  /// Whether the machine is kept awake while a server this app started is serving.
+  public var sleepPolicy: SleepPolicy
 
   public enum Key {
     public static let binaryPath = "dshBinaryPath"
@@ -41,6 +43,7 @@ public struct BarPreferences: Sendable, Equatable {
     public static let dshHome = "dshHome"
     public static let quitBehavior = "dshQuitBehavior"
     public static let hotKey = "dshHotKey"
+    public static let sleepPolicy = "dshSleepPolicy"
   }
 
   public static let defaultPort = 3080
@@ -58,7 +61,8 @@ public struct BarPreferences: Sendable, Equatable {
     dshHomeMode: DshHomeMode = .followShell,
     dshHome: String? = nil,
     quitBehavior: QuitBehavior = .stopManaged,
-    hotKey: HotKeyChoice = .default
+    hotKey: HotKeyChoice = .default,
+    sleepPolicy: SleepPolicy = .default
   ) {
     self.binaryPath = Self.normalizeBinaryPath(binaryPath)
     self.port = Self.normalizePort(port)
@@ -68,6 +72,7 @@ public struct BarPreferences: Sendable, Equatable {
     self.dshHome = Self.normalizeDshHome(dshHome)
     self.quitBehavior = quitBehavior
     self.hotKey = hotKey
+    self.sleepPolicy = sleepPolicy
   }
 
   /// 0 means "auto"; anything outside 1...65535 falls back to the default.
@@ -133,6 +138,12 @@ public struct BarPreferences: Sendable, Equatable {
     let mode = defaults.string(forKey: Key.dshHomeMode).flatMap(DshHomeMode.init(rawValue:)) ?? .followShell
     let quit = defaults.string(forKey: Key.quitBehavior).flatMap(QuitBehavior.init(rawValue:)) ?? .stopManaged
     let hotKey = defaults.string(forKey: Key.hotKey).flatMap(HotKeyChoice.init(rawValue:)) ?? .default
+    // The one place 0.4.0's "an upgrade changes nothing" rule is deliberately
+    // broken: keeping the machine awake while the server runs is the 0.5.0
+    // feature, it is bounded by the server's lifetime, it is visible in the panel
+    // footer, and the right-click menu turns it off in two clicks.
+    let sleep = defaults.string(forKey: Key.sleepPolicy)
+      .flatMap(SleepPolicy.init(rawValue:)) ?? .default
     return BarPreferences(
       binaryPath: defaults.string(forKey: Key.binaryPath),
       port: port,
@@ -141,7 +152,8 @@ public struct BarPreferences: Sendable, Equatable {
       dshHomeMode: mode,
       dshHome: defaults.string(forKey: Key.dshHome),
       quitBehavior: quit,
-      hotKey: hotKey
+      hotKey: hotKey,
+      sleepPolicy: sleep
     )
   }
 
@@ -151,6 +163,7 @@ public struct BarPreferences: Sendable, Equatable {
     defaults.set(dshHomeMode.rawValue, forKey: Key.dshHomeMode)
     defaults.set(quitBehavior.rawValue, forKey: Key.quitBehavior)
     defaults.set(hotKey.rawValue, forKey: Key.hotKey)
+    defaults.set(sleepPolicy.rawValue, forKey: Key.sleepPolicy)
     Self.store(binaryPath, key: Key.binaryPath, in: defaults)
     Self.store(workspacePath, key: Key.workspacePath, in: defaults)
     Self.store(dshHome, key: Key.dshHome, in: defaults)

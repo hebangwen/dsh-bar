@@ -295,6 +295,18 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       menu.addItem(.separator())
     }
 
+    // Two clicks, no window: the policy is the one setting worth reaching from the
+    // menu bar, because it changes what the machine does after you stop looking.
+    let sleep = NSMenuItem(
+      title: model.copy.sleepField,
+      action: #selector(toggleSleepGuard),
+      keyEquivalent: ""
+    )
+    sleep.target = self
+    sleep.state = model.preferences.sleepPolicy.isEnabled ? .on : .off
+    menu.addItem(sleep)
+    menu.addItem(.separator())
+
     let settings = NSMenuItem(title: model.copy.settings, action: #selector(openSettings), keyEquivalent: ",")
     settings.target = self
     menu.addItem(settings)
@@ -325,6 +337,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       let scene = DemoScene(rawValue: raw)
     else { return }
     model.jump(to: scene)
+  }
+
+  @objc private func toggleSleepGuard() {
+    let next: SleepPolicy = model.preferences.sleepPolicy.isEnabled ? .off : .whileListening
+    model.update(sleepPolicy: next)
   }
 
   @objc private func openSettings() {

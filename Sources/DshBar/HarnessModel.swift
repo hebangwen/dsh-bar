@@ -27,6 +27,9 @@ protocol HarnessBackend: AnyObject {
   func rereadEnvironment()
   /// Leave a managed server running across this quit, with a record for next time.
   func prepareHandoff()
+  /// Whether the idle-sleep assertion is held right now, and why not when it is not.
+  var sleepStatus: SleepGuardStatus { get }
+  var onSleepStatus: ((SleepGuardStatus) -> Void)? { get set }
 }
 
 enum AppearanceOverride: String, CaseIterable, Identifiable {
@@ -83,6 +86,9 @@ final class HarnessModel: ObservableObject {
   @Published private(set) var loginItemError: String?
   /// What the last attempt at registering the global shortcut concluded.
   @Published private(set) var hotKeyStatus: HotKeyStatus = .off
+  /// The caffeinate process the backend is holding, as the system sees it — not as
+  /// the preference asked for.
+  @Published private(set) var sleepStatus: SleepGuardStatus = .idle
   @Published var appearance: AppearanceOverride = .system {
     didSet { applyAppearance() }
   }
@@ -135,6 +141,10 @@ final class HarnessModel: ObservableObject {
     backend.onEnvironment = { [weak self] report in
       self?.environmentReport = report
     }
+    backend.onSleepStatus = { [weak self] status in
+      self?.sleepStatus = status
+    }
+    sleepStatus = backend.sleepStatus
     environmentReport = backend.environmentReport
     // `LaunchAtLogin.status()` shells out to `codesign`, so it is asked when the
     // settings window opens, not on every app launch.
@@ -387,6 +397,15 @@ final class HarnessModel: ObservableObject {
   func update(quitBehavior: QuitBehavior) {
     var next = preferences
     next.quitBehavior = quitBehavior
+    apply(next)
+  }
+
+  /// The guard is driven by the backend's snapshot/phase loop, so a policy change
+  /// only has to reach the preferences: `apply` hands them to the backend, and the
+  /// next dispatch reconciles the guard against them.
+  func update(sleepPolicy: SleepPolicy) {
+    var next = preferences
+    next.sleepPolicy = sleepPolicy
     apply(next)
   }
 

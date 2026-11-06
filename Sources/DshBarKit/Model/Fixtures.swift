@@ -106,7 +106,10 @@ public enum Fixtures {
         port: port,
         owner: .dshBar,
         uptime: 761,
-        log: log(port: port)
+        log: log(port: port),
+        // A managed server is the one case that holds the idle-sleep assertion, so
+        // the reviewed sheet shows the footer marker too.
+        awake: true
       )
     case .listeningExternal:
       return HarnessSnapshot(

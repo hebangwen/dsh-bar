@@ -1406,6 +1406,258 @@ func runChecks() -> Int32 {
   checks.check(zh.loginItemUnsigned.contains("签名"), "zh unsigned note explains the signature")
   checks.equal(en.openLoginItems, "Open Login Items…", "en login items button")
 
+  // MARK: - M4 · Keeping the machine awake (W1)
+
+  // The policy is data so the settings row, the menu item, and the guard all read
+  // one answer.
+  checks.equal(SleepPolicy.default, .whileListening, "the default policy asserts while serving")
+  checks.check(SleepPolicy.whileListening.isEnabled, "while-serving is enabled")
+  checks.check(!SleepPolicy.off.isEnabled, "off asserts nothing")
+  checks.equal(SleepPolicy.label(.off, language: .zhHans), "关闭", "zh off policy label")
+  checks.equal(SleepPolicy.label(.whileListening, language: .zhHans), "服务运行时", "zh while-serving label")
+  checks.equal(SleepPolicy.label(.off, language: .en), "Off", "en off policy label")
+  checks.equal(SleepPolicy.label(.whileListening, language: .en), "While serving", "en while-serving label")
+  checks.equal(SleepPolicy.forced(from: ["DSHBAR_SLEEP_POLICY": "off"]), .off, "the debug hook reads off")
+  checks.equal(
+    SleepPolicy.forced(from: ["DSHBAR_SLEEP_POLICY": "whileListening"]),
+    .whileListening,
+    "the debug hook reads while-serving"
+  )
+  checks.equal(SleepPolicy.forced(from: ["DSHBAR_SLEEP_POLICY": "bogus"]), nil, "an unknown hook value is ignored")
+  checks.equal(SleepPolicy.forced(from: [:]), nil, "a missing hook leaves the preference in charge")
+
+  // The command line: `-i` and `-w`, and nothing that would keep the display lit.
+  checks.equal(Caffeinate.flags, ["-i"], "the only flag is -i")
+  checks.equal(Caffeinate.executable, "/usr/bin/caffeinate", "the tool is the system one")
+  let servingArgs = Caffeinate.arguments(for: .whileListening, watching: 4242) ?? []
+  checks.equal(servingArgs, ["-i", "-w", "4242"], "the assertion names the watched pid")
+  checks.check(servingArgs.contains("-i"), "the system-sleep assertion is requested")
+  for flag in Caffeinate.forbiddenFlags {
+    checks.check(!servingArgs.contains(flag), "the assertion never passes \(flag)")
+  }
+  checks.equal(Caffeinate.arguments(for: .off, watching: 4242), nil, "a disabled policy builds no command")
+  checks.equal(Caffeinate.arguments(for: .whileListening, watching: 0), nil, "no pid means no command")
+  checks.check(
+    (Caffeinate.describe(for: .whileListening, watching: 4242) ?? "").hasSuffix("/usr/bin/caffeinate -i -w 4242"),
+    "the logged command names the tool, the flag, and the pid"
+  )
+  checks.check(Caffeinate.isAvailable(), "caffeinate exists on this system")
+
+  // `pmset -g assertions` as captured on this machine, caffeinate included. Parsing
+  // it is what turns "the display may sleep" into something a test can read.
+  let pmsetSample = [
+    "2026-11-06 09:42:02 +0800 ",
+    "Assertion status system-wide:",
+    "   BackgroundTask                 0",
+    "   PreventUserIdleDisplaySleep    0",
+    "   PreventUserIdleSystemSleep     1",
+    "Listed by owning process:",
+    "   pid 262(powerd): [0x00022f6f00018c7a] 00:19:17 PreventUserIdleSystemSleep named: \"Powerd - Prevent sleep while display is on\"  ",
+    "   pid 262(powerd): [0x0000604f00098e14] 48:40:28 UserIsActive named: \"com.apple.powermanagement.lidopen\"  ",
+    "   pid 290(apsd): [0x000233f400018dc3] 00:00:00 NoIdleSleepAssertion named: \"com.apple.apsd-keepalive-push.apple.com-NonCellular\"  ",
+    "   pid 57912(caffeinate): [0x000233f400018dc2] 00:00:00 PreventUserIdleSystemSleep named: \"caffeinate command-line tool\"  ",
+    "\tDetails: caffeinate asserting on behalf of Process ID 57911",
+    "\tCreated for PID: 57911. ",
+    "\tLocalized=THE CAFFEINATE TOOL IS PREVENTING SLEEP.",
+    "Kernel Assertions: 0x104=USB,MAGICWAKE",
+    "   id=542  level=255 0x100=MAGICWAKE creat=2026/11/3 00:00  mod=2026/11/6 08:52 description=en0 owner=IOSkywalkNetworkBSDClient",
+  ].joined(separator: "\n")
+
+  let assertions = SleepAssertion.parse(pmsetSample)
+  checks.equal(assertions.count, 4, "every assertion line is parsed")
+  checks.equal(SleepAssertion.parse("").count, 0, "an empty listing has no assertions")
+  let caffeinateLines = SleepAssertion.caffeinateAssertions(in: pmsetSample)
+  checks.equal(caffeinateLines.count, 1, "only the caffeinate assertion is the guard's")
+  checks.equal(caffeinateLines.first?.pid, 57912, "the caffeinate pid is read")
+  checks.equal(caffeinateLines.first?.watchedPID, 57911, "the watched pid comes from the continuation line")
+  checks.equal(caffeinateLines.first?.kind, .idleSystem, "caffeinate holds the idle-system assertion")
+  checks.equal(caffeinateLines.first?.name, "caffeinate command-line tool", "the assertion name is kept")
+  checks.check(
+    caffeinateLines.allSatisfy { $0.kind != .idleDisplay },
+    "caffeinate never holds the idle-display assertion"
+  )
+  checks.equal(
+    assertions.first(where: { $0.processName == "apsd" })?.kind,
+    .other,
+    "an unknown assertion kind parses as other"
+  )
+  checks.equal(
+    assertions.first(where: { $0.kind == SleepAssertion.Kind.userActive })?.watchedPID,
+    nil as Int?,
+    "a plain user-active assertion has no watched pid"
+  )
+  checks.equal(SleepAssertion.Kind(raw: "PreventUserIdleDisplaySleep"), .idleDisplay, "the display kind maps")
+  checks.equal(SleepAssertion.Kind(raw: "PreventSystemSleep"), .systemSleep, "the system kind maps")
+  checks.equal(SleepAssertion.Kind(raw: "BackgroundTask"), .backgroundTask, "the background kind maps")
+
+  // The decision table, without a single process.
+  let asserting7 = SleepGuardStatus.asserting(pid: 7)
+  checks.check(asserting7.isAsserting, "an asserting status is asserting")
+  checks.equal(asserting7.assertingPID, 7, "an asserting status names its pid")
+  checks.check(!SleepGuardStatus.idle.isAsserting, "idle is not asserting")
+  checks.check(!SleepGuardStatus.failed(detail: "x").isAsserting, "a failed guard is not asserting")
+  checks.check(!SleepGuardStatus.unavailable(reason: "x").isAsserting, "an unavailable guard is not asserting")
+
+  func plan(
+    _ policy: SleepPolicy,
+    _ watched: pid_t?,
+    _ status: SleepGuardStatus,
+    last: pid_t? = nil,
+    failed: Bool = false
+  ) -> SleepGuardPlan {
+    SleepGuardPlan.plan(
+      policy: policy,
+      watched: watched,
+      status: status,
+      lastAttempted: last,
+      lastAttemptFailed: failed
+    )
+  }
+  checks.equal(plan(.off, 7, asserting7), .release, "turning the policy off releases the assertion")
+  checks.equal(plan(.off, nil, .idle), .noop, "off with nothing held does nothing")
+  checks.equal(plan(.off, 7, .idle), .noop, "off never arms")
+  checks.equal(plan(.whileListening, nil, asserting7), .release, "no server means release")
+  checks.equal(plan(.whileListening, nil, .idle), .noop, "no server and nothing held does nothing")
+  checks.equal(plan(.whileListening, 7, asserting7), .noop, "the same pid is left alone")
+  checks.equal(plan(.whileListening, 8, asserting7), .arm(pid: 8), "a new dsh pid swaps the assertion")
+  checks.equal(plan(.whileListening, 7, .idle), .arm(pid: 7), "a listening server arms the guard")
+  checks.equal(
+    plan(.whileListening, 7, .idle, last: 7, failed: true),
+    .noop,
+    "a dead pid is not retried"
+  )
+  checks.equal(
+    plan(.whileListening, 7, .idle, last: 9, failed: true),
+    .arm(pid: 7),
+    "a different pid is still tried after a failure"
+  )
+  checks.equal(plan(.whileListening, 0, .idle), .noop, "pid 0 is never watched")
+  checks.equal(plan(.whileListening, 7, .failed(detail: "x"), last: 7, failed: true), .noop, "a failed guard waits")
+
+  // Which pid may be watched at all. The rule is the feature: only a server this
+  // app spawned, and only while it is listening.
+  checks.equal(
+    SleepGuardTarget.watchedPID(phase: .listening, owner: .dshBar, child: 31),
+    31,
+    "a managed listening server is watched"
+  )
+  checks.equal(
+    SleepGuardTarget.watchedPID(phase: .listening, owner: .external, child: 31),
+    nil,
+    "a terminal server is not"
+  )
+  checks.equal(
+    SleepGuardTarget.watchedPID(phase: .starting, owner: .dshBar, child: 31),
+    nil,
+    "a starting server holds nothing yet"
+  )
+  checks.equal(
+    SleepGuardTarget.watchedPID(phase: .stopping, owner: .dshBar, child: 31),
+    nil,
+    "a stopping server gives the assertion up"
+  )
+  checks.equal(
+    SleepGuardTarget.watchedPID(phase: .failed, owner: .dshBar, child: 31),
+    nil,
+    "a failed launch asserts nothing"
+  )
+  checks.equal(
+    SleepGuardTarget.watchedPID(phase: .listening, owner: .dshBar, child: nil),
+    nil,
+    "no child means nothing to watch"
+  )
+
+  // How an unexpected exit is read: with `-w` the normal ending is "the tool went
+  // with its server", which must not read as a failure in Settings.
+  checks.equal(
+    SleepGuardExit.status(code: 0, watchedAlive: false, watched: 12),
+    .idle,
+    "a caffeinate that ends with its dsh goes back to idle"
+  )
+  if case .failed = SleepGuardExit.status(code: 1, watchedAlive: true, watched: 12) {
+    checks.check(true, "a caffeinate that dies while the dsh lives is a failure")
+  } else {
+    checks.check(false, "a caffeinate that dies while the dsh lives is a failure")
+  }
+  checks.check(
+    SleepGuardExit.logLine(code: 0, watchedAlive: false, watched: 12).contains("with the dsh process"),
+    "the log says the assertion ended with the server"
+  )
+  checks.check(
+    SleepGuardExit.logLine(code: 1, watchedAlive: true, watched: 12).contains("is alive"),
+    "the log names the anomaly when the dsh outlives the assertion"
+  )
+
+  // Copy: every status has both languages, and the missing tool is translated
+  // rather than printed in English at a Chinese reader.
+  checks.equal(en.sleepField, "Keep awake", "en sleep field")
+  checks.equal(zh.sleepField, "防止休眠", "zh sleep field")
+  checks.equal(en.awakeBadge, "awake", "en footer badge")
+  checks.equal(zh.awakeBadge, "防休眠", "zh footer badge")
+  checks.check(en.sleepNote.contains("caffeinate -i"), "en note names the flag")
+  checks.check(en.sleepNote.contains("lid"), "en note says closing the lid still sleeps")
+  checks.check(zh.sleepNote.contains("合盖"), "zh note says closing the lid still sleeps")
+  checks.equal(en.sleepState(.idle), "not asserting", "en idle state")
+  checks.equal(zh.sleepState(.idle), "未防止", "zh idle state")
+  checks.check(en.sleepState(.asserting(pid: 42)).contains("42"), "en asserting state names the pid")
+  checks.check(zh.sleepState(.asserting(pid: 42)).contains("42"), "zh asserting state names the pid")
+  checks.equal(en.sleepState(.asserting(pid: 0)), "awake", "the fixture build omits a fake pid")
+  checks.check(
+    en.sleepState(.unavailable(reason: Caffeinate.missingReason)).contains("caffeinate is missing"),
+    "en missing-tool reason is translated"
+  )
+  checks.check(
+    zh.sleepState(.unavailable(reason: Caffeinate.missingReason)).contains("找不到"),
+    "zh missing-tool reason is translated"
+  )
+  checks.check(
+    en.sleepState(.unavailable(reason: "/usr/bin/caffeinate: denied")).contains("denied"),
+    "a system error is passed through"
+  )
+  checks.check(en.sleepState(.failed(detail: "code 1")).hasPrefix("exited"), "en failure state reads as an exit")
+  checks.equal(zh.sleepToolMissing, "找不到 /usr/bin/caffeinate", "zh missing-tool sentence")
+
+  // The preference, and the one deliberate break of the "an upgrade changes
+  // nothing" rule: a 0.4.0 domain has no sleep key and gets the feature.
+  let sleepSuite = "dev.dsh.bar.check.sleep.\(UUID().uuidString)"
+  if let domain = UserDefaults(suiteName: sleepSuite) {
+    checks.equal(
+      BarPreferences.load(from: domain).sleepPolicy,
+      .whileListening,
+      "a fresh domain keeps the machine awake while serving"
+    )
+    var off = BarPreferences.load(from: domain)
+    off.sleepPolicy = .off
+    off.save(to: domain)
+    checks.equal(BarPreferences.load(from: domain).sleepPolicy, .off, "turning it off survives a relaunch")
+    checks.equal(
+      BarPreferences.load(from: domain).replacing(port: 3099).sleepPolicy,
+      .off,
+      "changing the port keeps the policy"
+    )
+    checks.equal(
+      BarPreferences.load(from: domain).replacing(port: 3099).port,
+      3099,
+      "the port is still replaced"
+    )
+    domain.removePersistentDomain(forName: sleepSuite)
+  } else {
+    checks.check(false, "a throwaway defaults domain could not be created")
+  }
+
+  // The panel draws the fact, not the preference.
+  checks.check(!HarnessSnapshot(phase: .listening).awake, "a snapshot is not awake unless told")
+  checks.check(Fixtures.snapshot(for: .listening, copy: en).awake, "a managed server shows the awake badge")
+  checks.check(
+    !Fixtures.snapshot(for: .listeningExternal, copy: en).awake,
+    "an external server holds no assertion"
+  )
+  checks.check(
+    !Fixtures.snapshot(for: .listeningHandoff, copy: en).awake,
+    "a handed-off server holds no assertion"
+  )
+  checks.check(!Fixtures.snapshot(for: .stopped, copy: en).awake, "a stopped server is not awake")
+
   return checks.report()
 }
 

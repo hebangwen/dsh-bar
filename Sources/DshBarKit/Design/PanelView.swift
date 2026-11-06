@@ -325,6 +325,15 @@ public struct PanelView: View {
         }
         .buttonStyle(.plain)
 
+        // The only place the panel says the machine is being kept awake. It is a
+        // fact read off the guard, so it is absent whenever the assertion is not
+        // actually held — a preference alone never lights this up.
+        if snapshot.awake {
+          Text(copy.awakeBadge)
+            .font(Typography.meta)
+            .foregroundStyle(palette.inkTertiary)
+        }
+
         Spacer(minLength: 8)
 
         Button { actions(.quit) } label: {

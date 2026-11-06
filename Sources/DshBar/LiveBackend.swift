@@ -29,6 +29,14 @@ final class LiveBackend: HarnessBackend {
   private var isWarmingEnvironment = false
   private(set) var environmentReport: EnvironmentReport?
   var onEnvironment: ((EnvironmentReport?) -> Void)?
+  var sleepStatus: SleepGuardStatus { sleepGuard.status }
+  var onSleepStatus: ((SleepGuardStatus) -> Void)?
+
+  /// Holds the `caffeinate -i -w <dsh pid>` that keeps the machine awake while the
+  /// server is serving. Owned here because this is where the child pid is known.
+  private let sleepGuard = SleepGuard()
+  /// `DSHBAR_SLEEP_POLICY` wins over the preference, for scripted runs.
+  private let forcedSleepPolicy = SleepPolicy.forced(from: ProcessInfo.processInfo.environment)
 
   private var watchTimer: Timer?
   private var readyTimer: Timer?
@@ -47,6 +55,18 @@ final class LiveBackend: HarnessBackend {
     snapshot.profile = preferences.profile
     snapshot.lastRun = nil
     state = HarnessState(snapshot: snapshot)
+    // The guard speaks from the main queue; its lines belong in the same log the
+    // panel shows, next to dsh's own output.
+    sleepGuard.onChange = { [weak self] status in
+      guard let self else { return }
+      self.onSleepStatus?(status)
+      self.emit()
+    }
+    sleepGuard.onEvent = { [weak self] line in
+      guard let self else { return }
+      self.writer.note(line)
+      self.append(line: "dsh bar: \(line)", stream: .err)
+    }
     startWatching()
     // The first Start should not pay for a shell launch, and a hung rc file must
     // not be able to block the click.
@@ -183,6 +203,9 @@ final class LiveBackend: HarnessBackend {
   /// killed dsh leaves a session store that the next boot has to repair.
   func shutdown() {
     invalidateTimers()
+    // Before the process goes: the assertion is about a server that is about to
+    // stop, and nothing should be left holding the machine awake.
+    sleepGuard.release()
     guard let child else { return }
     child.terminate()
     let deadline = Date().addingTimeInterval(0.8)
@@ -207,8 +230,28 @@ final class LiveBackend: HarnessBackend {
   }
 
   private func emit() {
+    // Reconcile before publishing: the footer's `awake` word has to describe the
+    // assertion state this snapshot is drawn with, not the previous one.
+    syncSleepGuard()
     state.snapshot.log = log.lines
+    state.snapshot.awake = sleepGuard.status.isAsserting
     onSnapshot?(state.snapshot)
+  }
+
+  /// The assertion exists exactly while a server this app started is listening.
+  ///
+  /// The pid matters: `caffeinate -w` ties the assertion to that process, so a dsh
+  /// that dies takes the assertion with it even if this app never gets to react.
+  /// Called after every dispatch, which includes the once-a-second uptime tick —
+  /// `SleepGuardPlan` returns `noop` in the steady state, so that costs a lock and
+  /// two comparisons.
+  private func syncSleepGuard() {
+    let watched = SleepGuardTarget.watchedPID(
+      phase: state.snapshot.phase,
+      owner: state.snapshot.owner,
+      child: child?.pid
+    )
+    sleepGuard.reconcile(policy: forcedSleepPolicy ?? preferences.sleepPolicy, watching: watched)
   }
 
   private func perform(_ command: HarnessCommand) {
@@ -695,6 +738,10 @@ final class LiveBackend: HarnessBackend {
   /// Keep the running server alive across this quit, and write down enough for the
   /// next launch to recognise it. Never signals anything.
   func prepareHandoff() {
+    // The app is going away, so the power behaviour it introduced goes with it.
+    // `-w` bounds the server's own lifetime from here on; if it is killed with
+    // SIGKILL later, caffeinate still exits with it.
+    sleepGuard.release()
     guard let child, state.snapshot.phase == .listening, state.snapshot.owner == .dshBar else {
       writer.note("handoff skipped: no managed server is listening")
       return

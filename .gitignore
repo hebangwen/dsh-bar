@@ -8,7 +8,10 @@ build/
 renders.db
 *.db
 
-# dshbar-snap writes one PNG per scene × theme × language; the contact sheet is the copy
-# that gets reviewed, so these are not tracked (the hand-shot panel-live-*.png still are).
+# dshbar-snap writes one PNG per scene × theme × language plus a multi-scene contact
+# sheet. Neither is kept in the repo: render them into a temp folder when reviewing, and
+# keep only the hand-shot panel-live-*.png and the per-pane settings sheets here.
 docs/design/panel-*-light-*.png
 docs/design/panel-*-dark-*.png
+docs/design/sheet-zhHans.png
+docs/design/sheet-en.png

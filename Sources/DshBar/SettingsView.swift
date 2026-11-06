@@ -451,6 +451,23 @@ struct SettingsView: View {
       }
       note(copy.quitNote)
 
+      row(copy.sleepField) {
+        InkSegmented(
+          selection: Binding(
+            get: { model.preferences.sleepPolicy },
+            set: { model.update(sleepPolicy: $0) }
+          ),
+          options: SleepPolicy.allCases,
+          label: { SleepPolicy.label($0, language: copy.language) }
+        )
+        Text(copy.sleepState(model.sleepStatus))
+          .font(.system(size: 10.5, design: .monospaced))
+          .foregroundStyle(sleepStateStyle)
+          .fixedSize()
+        Spacer(minLength: 0)
+      }
+      note(sleepNote, tone: sleepNoteTone)
+
       row(copy.shortcutField) {
         InkSegmented(
           selection: Binding(
@@ -546,6 +563,34 @@ struct SettingsView: View {
     case .enabled: return AnyShapeStyle(.secondary)
     case .requiresApproval: return AnyShapeStyle(palette.warn)
     case .notRegistered, .unavailable: return AnyShapeStyle(.tertiary)
+    }
+  }
+
+  /// The row's chip is the guard's own status: a preference that says "on" while
+  /// caffeinate is missing must not read as green.
+  private var sleepStateStyle: AnyShapeStyle {
+    switch model.sleepStatus {
+    case .asserting: return AnyShapeStyle(.secondary)
+    case .idle: return AnyShapeStyle(.tertiary)
+    case .unavailable: return AnyShapeStyle(palette.fail)
+    case .failed: return AnyShapeStyle(palette.warn)
+    }
+  }
+
+  private var sleepNote: String {
+    switch model.sleepStatus {
+    case .unavailable, .failed:
+      return copy.sleepState(model.sleepStatus)
+    case .idle, .asserting:
+      return copy.sleepNote
+    }
+  }
+
+  private var sleepNoteTone: Color? {
+    switch model.sleepStatus {
+    case .unavailable: return palette.fail
+    case .failed: return palette.warn
+    case .idle, .asserting: return nil
     }
   }
 

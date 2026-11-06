@@ -401,6 +401,44 @@ public struct Copy: Sendable {
     zh("ad-hoc 签名每次构建都会变，先固定签名再开", "an ad-hoc signature changes every build; sign it first")
   }
 
+  // MARK: - Keeping the machine awake
+
+  public var sleepField: String { zh("防止休眠", "Keep awake") }
+
+  /// The footer word. Two characters, like the rest of the footer: it is a status,
+  /// not a control, and the panel's only recessed surface is the readout band.
+  public var awakeBadge: String { zh("防休眠", "awake") }
+
+  public var sleepNote: String {
+    zh(
+      "只阻止系统待机休眠（caffeinate -i），屏幕仍按系统设置关闭；合盖仍然会休眠。",
+      "Prevents idle system sleep only (caffeinate -i). The screen still turns off on its own schedule; closing the lid still sleeps."
+    )
+  }
+
+  /// The tool's own absence, translated here rather than printed as an English
+  /// sentence at a Chinese reader. A system error is passed through untouched.
+  public var sleepToolMissing: String {
+    zh("找不到 /usr/bin/caffeinate", "/usr/bin/caffeinate is missing")
+  }
+
+  public func sleepState(_ status: SleepGuardStatus) -> String {
+    switch status {
+    case .idle:
+      return zh("未防止", "not asserting")
+    case .asserting(let pid) where pid > 0:
+      return zh("正在防止休眠 · pid \(pid)", "awake · pid \(pid)")
+    case .asserting:
+      // The fixture build has no process to name.
+      return zh("正在防止休眠", "awake")
+    case .unavailable(let reason):
+      let text = reason == Caffeinate.missingReason ? sleepToolMissing : reason
+      return zh("不可用：\(text)", "unavailable: \(text)")
+    case .failed(let detail):
+      return zh("已退出：\(detail)", "exited: \(detail)")
+    }
+  }
+
   // MARK: - Folder access
 
   /// `~/Documents` is TCC-protected; dsh's default workspace lives inside it, so

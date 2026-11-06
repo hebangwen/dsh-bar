@@ -17,6 +17,9 @@ final class DemoBackend: HarnessBackend {
   private var snapshot: HarnessSnapshot
   private var startedAt: Date?
   private var ticker: Timer?
+  /// The fixture build has no caffeinate of its own; it mirrors the rule so the
+  /// footer marker and the settings row can be reviewed without a real server.
+  private var sleepPolicy: SleepPolicy = .default
   private var pending: DispatchWorkItem?
 
   init(language: UILanguage, port: Int, profile: String) {
@@ -100,6 +103,22 @@ final class DemoBackend: HarnessBackend {
   func update(_ preferences: BarPreferences) {
     port = preferences.port
     profile = preferences.profile
+    if sleepPolicy != preferences.sleepPolicy {
+      sleepPolicy = preferences.sleepPolicy
+      var next = snapshot
+      next.awake = shouldAssert
+      publish(next)
+    }
+  }
+
+  var sleepStatus: SleepGuardStatus { shouldAssert ? .asserting(pid: 0) : .idle }
+  var onSleepStatus: ((SleepGuardStatus) -> Void)? {
+    didSet { onSleepStatus?(sleepStatus) }
+  }
+
+  /// The same rule the live backend applies: managed server, listening, policy on.
+  private var shouldAssert: Bool {
+    sleepPolicy.isEnabled && snapshot.phase == .listening && snapshot.owner == .dshBar
   }
 
   func refreshExternal() {}
@@ -157,12 +176,17 @@ final class DemoBackend: HarnessBackend {
     }
   }
 
-  private func publish(_ next: HarnessSnapshot) {
-    snapshot = next
-    launchURL = next.phase == .listening && next.owner == .dshBar && next.hasLaunchURL
-      ? "http://\(next.address)/?token=demo"
+  /// One rule for the fixture build as well: what the footer claims is derived
+  /// from the scene and the policy, never copied from the scene alone.
+  private func publish(_ scene: HarnessSnapshot) {
+    var out = scene
+    out.awake = sleepPolicy.isEnabled && out.phase == .listening && out.owner == .dshBar
+    snapshot = out
+    launchURL = out.phase == .listening && out.owner == .dshBar && out.hasLaunchURL
+      ? "http://\(out.address)/?token=demo"
       : nil
-    onSnapshot?(next)
+    onSnapshot?(out)
+    onSleepStatus?(sleepStatus)
   }
 
   private func after(_ seconds: TimeInterval, _ work: @escaping () -> Void) {

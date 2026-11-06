@@ -2,11 +2,7 @@
 
 macOS 菜单栏里的 dsh 管理器：把 `dsh --profile web` 挂在它下面，用面板启动 / 停止 / 重启，并一键进入网页界面。
 
-**当前进度：M3 打磨完成，0.4.0。** 面板、状态、动效、菜单栏图标按设计实现；每个状态都由一个真实的 `dsh --profile web` 进程驱动。M3 把「能跑」补成了「可以每天用」：工作区与 `DSH_HOME`、环境诊断、退出策略（含保留运行时的交接记录）、单实例、全局快捷键、`SMAppService` 开机自启。规划见 [docs/plan/round-3.md](docs/plan/round-3.md)。
-
-![面板总览（中文）](docs/design/sheet-zhHans.png)
-
-英文总览图（同样的场景，英文文案）在 [sheet-en.png](docs/design/sheet-en.png)。
+**当前进度：0.5.0。** 面板、状态、动效、菜单栏图标按设计实现；每个状态都由一个真实的 `dsh --profile web` 进程驱动。M3 把「能跑」补成了「可以每天用」（工作区与 `DSH_HOME`、环境诊断、退出策略与交接记录、单实例、全局快捷键、开机自启）；第四轮加了一件事：**服务在监听时，机器不进待机休眠，屏幕照常关闭**。规划见 [docs/plan/round-4.md](docs/plan/round-4.md)，第三轮的取舍在 [round-3.md](docs/plan/round-3.md)。
 
 ---
 
@@ -79,7 +75,37 @@ macOS 菜单栏里的 dsh 管理器：把 `dsh --profile web` 挂在它下面，
 ![真实监听](docs/design/panel-live-3099.png)
 ![外部实例](docs/design/panel-live-external-3080.png)
 
-设置窗口有四个页签（通用 / 工作区 / 环境 / 行为）：通用里是 dsh 路径（`更改…` / `重新检测`）、端口（`0` = 自动）、profile、外观与开机自启；工作区里是工作目录、`DSH_HOME` 和文稿文件夹授权。启动时还会异步跑 `dsh --version` 显示版本。演示模式（`DSHBAR_DEMO=1`）保留下来供设计评审，右键的"外观预览状态"子菜单只在演示模式里出现。
+设置窗口有四个页签（通用 / 工作区 / 环境 / 行为）：通用里是 dsh 路径（`更改…` / `重新检测`）、端口（`0` = 自动）、profile、外观与开机自启；工作区里是工作目录、`DSH_HOME` 和文稿文件夹授权；行为里是退出策略、防止休眠和全局快捷键。启动时还会异步跑 `dsh --version` 显示版本。演示模式（`DSHBAR_DEMO=1`）保留下来供设计评审，右键的"外观预览状态"子菜单只在演示模式里出现。
+
+## 防止休眠
+
+长会话跑起来以后，人走开、屏幕熄灭，机器不该跟着睡过去。dsh bar 用系统自带的 `caffeinate` 做这件事，**只管待机休眠，不管屏幕**：
+
+```text
+/usr/bin/caffeinate -i -w <dsh 的 pid>
+```
+
+- **`-i` 是唯一被允许的开关。** 它断言「别让系统空闲休眠」，显示器该睡照睡。`-d` 会连屏幕一起点亮，`-u` 声明用户活跃（同样重置显示器计时器），`-s` 只在电源适配器下有效且范围更宽，`-m` 管的是磁盘——四个都不用，`Caffeinate.forbiddenFlags` 里逐条列着，`dshbar-check` 逐条断言不出现。
+- **`-w <pid>` 是安全阀。** 断言绑在 dsh 的 pid 上：dsh 一退，caffeinate 自己退，就算 app 被 `kill -9` 也不会留下一条永久断言——最多留到 dsh 退出为止。
+- **只在「这次 app 启动的服务正在监听」时持有。** 终端里起的 dsh、上次交接留下的实例、`.starting` / `.stopping` / 失败状态都不持有：断言要有可信的 pid 锚点，而且它不该在用户已经按下停止之后还改变机器的行为。
+
+三个入口，一个真相：
+
+| 位置 | 做什么 |
+|---|---|
+| 设置 › 行为 › 防止休眠 | `关闭` / `服务运行时`（默认），右边是**当前事实**：`正在防止休眠 · pid N` / `未防止` / `不可用：…` |
+| 面板页脚 | 断言真在生效时多一个 `防休眠` / `awake` 词；偏好开着但这会儿没服务，则什么也不显示 |
+| 右键菜单 | `防止休眠` 勾选项，两下切换，不开窗口 |
+
+```sh
+pmset -g assertions | grep -i caffeinate   # 服务监听时应有一条 PreventUserIdleSystemSleep，且没有 PreventUserIdleDisplaySleep
+defaults write dev.dsh.bar dshSleepPolicy -string off   # 直接关掉
+```
+
+硬边界：**合盖仍然会休眠**。断言只覆盖空闲休眠；`pmset disablesleep` 和显示器休眠时间 app 一律不碰。笔记本装包里照样会掉电、发热，所以这个功能有页脚字样、有开关、有三处入口。
+
+![行为页：防止休眠（中文）](docs/design/sheet-settings-behavior-zhHans.png)
+![Behavior: keep awake (English)](docs/design/sheet-settings-behavior-en.png)
 
 ## 文稿文件夹权限
 
@@ -225,10 +251,11 @@ open "build/dsh bar.app"        # 菜单栏出现图标，点开就是面板
 开发与验证：
 
 ```sh
-swift run dshbar-check                            # 454 项校验：文案、状态谓词、解析、状态机、fixture、图标帧、文件夹权限、node/PATH
+swift run dshbar-check                            # 544 项校验：文案、状态谓词、解析、状态机、fixture、图标帧、文件夹权限、node/PATH、防休眠决策表
 swift run dshbar-smoke --port 3099                # 真机端到端：定位 → node 可解析 → 启动 → 校验 URL/401 → 停止 → 端口释放
+swift run dshbar-smoke --port 3099 --sleep        # 同上，外加一条真断言：pmset 里出现 -i、没有 -d，dsh 一停它自己消失
 swift run dshbar-smoke --external --port 3099     # 接管前半段：lsof 找 pid → ps 校验命令行 → SIGTERM → 端口释放
-swift run dshbar-snap docs/design                 # 离屏渲染所有状态 → PNG（浅/深 × 中/英）
+swift run dshbar-snap /tmp/dshbar-snap            # 离屏渲染所有状态 → PNG（浅/深 × 中/英）；产物不入库
 DSHBAR_OPEN_PANEL=1 "build/dsh bar.app/Contents/MacOS/DshBar"   # 启动即弹面板
 DSHBAR_AUTOSTART=1 ...                                           # 启动后立即 start（联调用，省一次点击）
 DSHBAR_AUTORESTART=1 ...                                         # 再等 9 秒按一次"重新启动"
@@ -241,6 +268,7 @@ DSHBAR_SNAPSHOT_DARK=1 ...                                       # 设置页快�
 DSHBAR_ALLOW_SECOND_INSTANCE=1 ...                               # 跳过单实例判定，跑第二份 app（截图/联调）
 DSHBAR_SKIP_FOLDER_GRANT=1 ...                                   # 跳过启动时的授权模态，脚本也能拉起服务器
 DSHBAR_QUIT_BEHAVIOR=keepRunning ...                             # 覆盖退出策略：验证「保留运行」
+DSHBAR_SLEEP_POLICY=off ...                                      # 覆盖防止休眠策略（off / whileListening）
 DSHBAR_DEMO=1 ...                                                # 演示模式：状态由 fixture 驱动
 ```
 
@@ -273,6 +301,9 @@ Sources/DshBarKit/            可测的设计系统 + 领域模型 + 纯逻辑�
   Live/SingleInstance.swift   第二份 app 让位给第一份
   Live/HotKeyChoice.swift     ⌥⌘D / ⌃⌥D / 关闭的描述符
   Live/LaunchAtLogin.swift    SMAppService 状态映射与稳定签名判断
+  Live/SleepPolicy.swift      防止休眠两档策略（off / 服务运行时）
+  Live/Caffeinate.swift       caffeinate 命令构造 + `pmset -g assertions` 解析
+  Live/SleepGuard.swift       断言生命周期：何时 arm、何时放、失败怎么记
 Sources/DshBar/               菜单栏 app：NSStatusItem + NSPanel + SwiftUI
   HarnessModel.swift          唯一的 ObservableObject：面板状态 + 动作
   LiveBackend.swift           真实副作用：环境、定位、spawn、超时、日志落盘
@@ -280,7 +311,7 @@ Sources/DshBar/               菜单栏 app：NSStatusItem + NSPanel + SwiftUI
   DemoBackend.swift           演示驱动（fixture 状态，供设计评审）
 Sources/DshBarSnapshot/       离屏出图工具（ImageRenderer → PNG）
 Sources/DshBarSmoke/          真机端到端验证（启动 → 校验 → 停止）
-Sources/DshBarCheck/          454 项断言的可执行检查（不依赖 XCTest / Xcode）
+Sources/DshBarCheck/          544 项断言的可执行检查（不依赖 XCTest / Xcode）
 scripts/                      build-app.sh / make-icon.swift
 docs/design/                  外观图（评审用）
 docs/plan/                    轮次规划（round-3.md = M3 打磨 → 0.4.0）
@@ -290,7 +321,8 @@ docs/plan/                    轮次规划（round-3.md = M3 打磨 → 0.4.0）
 
 ## 下一步
 
-- **M4 多实例**：现在一个 app 只跟一个 dsh；下一步是多个 profile / 端口并存，面板列出来分别启动与停止。附带日志面板（不离开面板就能翻 `LogBuffer`）和「导出诊断」（环境报告 + 最近日志一次打包）。
+- **M4 多实例**：现在一个 app 只跟一个 dsh；下一步是多个 profile / 端口并存，面板列出来分别启动与停止。附带日志面板（不离开面板就能翻 `LogBuffer`）和「导出诊断」（环境报告 + 最近日志一次打包）。防止休眠届时要从「盯一个 pid」变成「盯一组 pid」，`SleepGuardTarget` 已经按纯函数写好，正是为这个改的。
+- 第四轮的取舍、以及「哪些只能在 Aqua 会话里手工确认」记在 [docs/plan/round-4.md](docs/plan/round-4.md)。
 - 第三轮的取舍留在 [docs/plan/round-3.md](docs/plan/round-3.md) 末尾，改动前值得读一眼。
 - 想恢复 `swift test` 的话，把 `DshBarCheck` 里的断言搬回 test target 即可。
 

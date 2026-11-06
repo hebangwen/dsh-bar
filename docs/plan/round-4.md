@@ -101,6 +101,10 @@ pmset -g assertions | grep -i caffeinate
 defaults write dev.dsh.bar dshSleepPolicy -string off   # 关掉后再看一次
 ```
 
+## 5.1 追加：README 瘦身
+
+0.5.0 提交之后把 README 从 333 行压到 111 行：只留「它是什么 / 状态表 / 能做什么 / 两个入口 / 命令 / 结构 / 下一步」，实现细节整体搬到 `docs/notes/implementation-notes.md`（设计 token、找 dsh 的三处坑、失败对照、菜单栏动效实测、文稿文件夹三层、防休眠三条硬事实）。round-3 文档里提到的「README 新增第三轮小节」因此不再单独存在——那是当时的记录，保持原样不改写。
+
 ## 6. 边界（记录在案）
 
 - **合盖仍然会睡**。要连合盖都不睡只能 `sudo pmset -a disablesleep 1`，那是系统级设置，不属于这个 app。

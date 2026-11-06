@@ -84,6 +84,7 @@ public struct Copy: Sendable {
     case .starting: return zh("正在启动…", "Starting…")
     case .listening: return zh("正在监听", "Listening")
     case .stopping: return zh("正在停止…", "Stopping…")
+    case .restarting: return zh("正在重启…", "Restarting…")
     case .failed: return zh("启动失败", "Couldn’t start")
     }
   }
@@ -97,7 +98,12 @@ public struct Copy: Sendable {
       return snapshot.lastRun.map { zh("上次运行 \($0)", "last run \($0)") }
         ?? zh("从未运行", "never run")
     case .starting:
+      if let attempt = snapshot.restartAttempt {
+        return zh("第 \(attempt) 次重试", "retry \(attempt)")
+      }
       return zh("等待响应", "waiting for a response")
+    case .restarting:
+      return restartTiming(snapshot)
     case .stopping:
       return zh("正在关闭进程", "closing the process")
     case .listening:
@@ -117,6 +123,7 @@ public struct Copy: Sendable {
     case .unavailable: return zh("选择 dsh 可执行文件…", "Choose dsh executable…")
     case .stopped: return zh("启动", "Start")
     case .starting: return zh("正在启动…", "Starting…")
+    case .restarting: return zh("正在重启…", "Restarting…")
     case .stopping: return zh("正在停止…", "Stopping…")
     case .listening:
       return snapshot.owner == .external
@@ -130,7 +137,7 @@ public struct Copy: Sendable {
     switch snapshot.phase {
     case .listening:
       return confirmingStop ? zh("确认停止？", "Stop for sure?") : zh("停止", "Stop")
-    case .starting:
+    case .starting, .restarting:
       return zh("取消", "Cancel")
     case .failed:
       switch snapshot.failure?.recovery {
@@ -576,6 +583,97 @@ public struct Copy: Sendable {
 
   public var tokenRedactedNote: String {
     zh("日志里的 token 已打码。", "Tokens are masked in the log.")
+  }
+
+  // MARK: - Crash watchdog & notifications
+
+  /// The readout line while the watchdog waits: "第 2 次 · 4 秒后".
+  public func restartTiming(_ snapshot: HarnessSnapshot) -> String {
+    let attempt = snapshot.restartAttempt ?? 1
+    let delay = snapshot.restartDelay ?? 0
+    return zh("第 \(attempt) 次 · \(delay) 秒后", "retry \(attempt) · in \(delay)s")
+  }
+
+  /// The one sentence under the readout while `.restarting`.
+  public func restartNote(_ snapshot: HarnessSnapshot) -> String {
+    let attempt = snapshot.restartAttempt ?? 1
+    let budget = CrashWatchdog.maxAttempts
+    let reason = snapshot.failure.map { diagnosis($0).title }
+      ?? zh("进程退出。", "The process exited.")
+    let delay = snapshot.restartDelay ?? 0
+    return zh(
+      "\(reason)自动重启第 \(attempt) 次（共 \(budget) 次），\(delay) 秒后开始。",
+      "\(reason) Restart \(attempt) of \(budget) in \(delay)s."
+    )
+  }
+
+  public var autoRestartField: String { zh("崩溃自动重启", "Restart on crash") }
+
+  public var autoRestartNote: String {
+    zh(
+      "服务在监听时崩溃就自动重启，最多 3 次、间隔 1/2/4 秒；预算用完就停下并通知。手动启动重新计数。",
+      "If the server dies while serving, restart it — at most three times, 1/2/4 seconds apart. When the budget is gone it stops and notifies. A manual Start resets the count."
+    )
+  }
+
+  public var notifyField: String { zh("通知", "Notifications") }
+
+  public var notifyNote: String {
+    zh(
+      "启动失败、崩溃、重启放弃、停止失败各推一条系统通知；第一次需要时才向系统申请权限。",
+      "One system notification each for a failed start, a crash, a give-up and a failed stop; permission is asked the first time one is needed."
+    )
+  }
+
+  public func notificationState(_ permission: NotificationPermission) -> String {
+    switch permission {
+    case .allowed: return zh("已允许", "allowed")
+    case .denied: return zh("已被系统拒绝", "denied by the system")
+    case .notDetermined: return zh("尚未询问", "not asked yet")
+    case .unknown: return zh("读取中", "reading")
+    case .unavailable: return zh("不可用", "unavailable")
+    }
+  }
+
+  public var notificationDeniedNote: String {
+    zh(
+      "系统里已拒绝：在「系统设置 → 通知 → dsh bar」里打开，这里才能推。",
+      "The system recorded a refusal: turn dsh bar on under System Settings → Notifications."
+    )
+  }
+
+  public var openNotificationSettings: String { zh("打开通知设置…", "Open Notifications…") }
+
+  public func notificationTitle(_ event: NotificationEvent) -> String {
+    switch event {
+    case .startFailed: return zh("dsh 启动失败", "dsh could not start")
+    case .crashed(_, let restarting, _):
+      return restarting
+        ? zh("dsh 崩了，正在重启", "dsh crashed; restarting")
+        : zh("dsh 意外退出", "dsh exited unexpectedly")
+    case .restartGaveUp: return zh("dsh 重启失败，已停止", "dsh could not be restarted")
+    case .stopFailed: return zh("dsh 没有停下", "dsh did not stop")
+    }
+  }
+
+  public func notificationBody(_ event: NotificationEvent) -> String {
+    switch event {
+    case .startFailed(let failure):
+      return diagnosis(failure).title
+    case .crashed(let failure, let restarting, let attempt):
+      let reason = diagnosis(failure).title
+      if restarting, let attempt {
+        return zh("\(reason) 第 \(attempt) 次重启即将开始。", "\(reason) Restart \(attempt) is about to start.")
+      }
+      return reason
+    case .restartGaveUp(let attempts):
+      return zh(
+        "连续 \(attempts) 次重启都没成功，已停止自动重启。打开面板看日志。",
+        "Gave up after \(attempts) restarts. Open the panel for the log."
+      )
+    case .stopFailed(let failure):
+      return diagnosis(failure).title
+    }
   }
 
   // MARK: - Folder access

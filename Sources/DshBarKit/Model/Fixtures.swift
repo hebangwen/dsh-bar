@@ -21,6 +21,8 @@ public enum DemoScene: String, Sendable, CaseIterable {
   case listeningLAN
   /// 0.6.0: a launch refused before spawn because one flag cannot be sent.
   case failedFlags
+  /// 0.7.0: the server died while serving and the watchdog is waiting to retry.
+  case restarting
 
   public var title: String {
     switch self {
@@ -36,6 +38,7 @@ public enum DemoScene: String, Sendable, CaseIterable {
     case .listeningHandoff: return "listening-handoff"
     case .listeningLAN: return "listening-lan-tls"
     case .failedFlags: return "failed-flags"
+    case .restarting: return "restarting"
     }
   }
 }
@@ -194,6 +197,19 @@ public enum Fixtures {
             stream: .err
           )
         ]
+      )
+    case .restarting:
+      return HarnessSnapshot(
+        phase: .restarting,
+        port: port,
+        owner: .dshBar,
+        uptime: nil,
+        failure: HarnessFailure(kind: .exited(code: 1), detail: "signal 9"),
+        busy: true,
+        restartAttempt: 2,
+        restartDelay: 4
+        // No `secure`/`bindHost`: the review scene is the plain loopback server,
+        // and the footer already carries two words in the LAN scene.
       )
     case .listeningLAN:
       return HarnessSnapshot(

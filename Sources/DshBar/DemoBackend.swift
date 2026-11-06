@@ -23,6 +23,11 @@ final class DemoBackend: HarnessBackend {
   /// The fixture build has no argv either; it mirrors the flags so the footer's
   /// LAN/TLS words can be reviewed without a real server.
   private var flags: WebLaunchFlags = .empty
+  /// The review build has no notification centre; it says what the real one would.
+  var notificationPermission: NotificationPermission = .allowed
+  var onNotificationPermission: ((NotificationPermission) -> Void)? {
+    didSet { onNotificationPermission?(notificationPermission) }
+  }
   private var pending: DispatchWorkItem?
 
   init(language: UILanguage, port: Int, profile: String) {
@@ -167,13 +172,24 @@ final class DemoBackend: HarnessBackend {
 
   func prepareHandoff() {}
 
+  func refreshNotificationPermission() {
+    onNotificationPermission?(notificationPermission)
+  }
+
+  func requestNotificationAuthorization() {
+    notificationPermission = .allowed
+    onNotificationPermission?(notificationPermission)
+  }
+
+  func clearDeliveredNotifications() {}
+
   // MARK: - Internals
 
   var currentScene: DemoScene? {
     switch snapshot.phase {
     case .unavailable: return .unavailable
     case .stopped: return .stopped
-    case .starting: return .starting
+    case .starting, .restarting: return .starting
     case .stopping: return .stopping
     case .failed: return snapshot.failure?.port == nil ? .failedExit : .failedPort
     case .listening: return snapshot.owner == .external ? .listeningExternal : .listening

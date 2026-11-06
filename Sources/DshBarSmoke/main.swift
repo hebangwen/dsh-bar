@@ -24,6 +24,14 @@ enum Smoke {
     let flags = flagRun
       ? WebLaunchFlags(host: "127.0.0.1", trustedHosts: ["127.0.0.1:\(requested)"])
       : .empty
+    // `--watchdog` runs the crash → retry half without the app: a real dsh is
+    // killed with SIGKILL while serving, and the reducer's decisions are driven by
+    // hand through the same transitions `LiveBackend` performs.
+    let watchdogRun = arguments.contains("--watchdog")
+    // `--watchdog off` is one argument; `contains("--watchdog off")` would
+    // silently enable the watchdog because the shell splits it into two.
+    let watchdogOff = arguments.contains("--watchdog")
+      && (value(for: "--watchdog", in: arguments) ?? "on") == "off"
     guard requested != 3080, (1...65535).contains(requested) else {
       print("refusing port \(requested): use something other than 3080, e.g. 3099")
       exit(1)
@@ -67,6 +75,18 @@ enum Smoke {
       LoginShellEnvironment.hasNode(onPath: spawnEnvironment["PATH"]),
       "PATH resolves node for dsh (\(LoginShellEnvironment.nodePath(onPath: spawnEnvironment["PATH"]) ?? "none"))"
     )
+
+    if watchdogRun {
+      exit(
+        watchdog(
+          environment: spawnEnvironment,
+          detection: detection,
+          profile: preferences.profile,
+          port: requested,
+          enabled: !watchdogOff
+        )
+      )
+    }
 
     if arguments.contains("--external") {
       exit(takeOver(environment: spawnEnvironment, detection: detection, port: requested))
@@ -251,6 +271,144 @@ enum Smoke {
     }
     print("\n✗ \(failures.count) smoke checks failed")
     exit(1)
+  }
+
+
+  /// The crash half of the watchdog, end to end with a real dsh: boot it, kill it
+  /// with SIGKILL while it is serving, and drive the same reducer the app drives —
+  /// `.exited` → `.restarting` → `.restartDue` → probe → spawn → `.launch(.ready)`.
+  ///
+  /// Nothing is faked except the timer: the delay is read from the state and then
+  /// slept through, so what is proven is that a real dsh can be restarted on the
+  /// same port and that the policy fires exactly once per transition.
+  private static func watchdog(
+    environment: [String: String],
+    detection: DshDetection,
+    profile: String,
+    port: Int,
+    enabled: Bool
+  ) -> Int32 {
+    var failures: [String] = []
+    func check(_ condition: Bool, _ message: String) {
+      print(condition ? "✓ \(message)" : "✗ \(message)")
+      if !condition { failures.append(message) }
+    }
+
+    guard PortProbe.probe(port: port) == .free else {
+      print("✗ port \(port) is not free")
+      return 1
+    }
+
+    /// Boot a dsh and come back once it printed its URL.
+    func boot() -> (ChildProcess, LaunchReport)? {
+      guard let child = try? ChildProcess(
+        executable: detection.path,
+        arguments: WebLaunchFlags.empty.arguments(profile: profile, port: port),
+        environment: environment
+      ) else { return nil }
+      var report: LaunchReport?
+      child.onLine = { _, text in
+        if case .ready(let parsed) = LaunchOutput.classify(text) { report = parsed }
+      }
+      let deadline = Date().addingTimeInterval(30)
+      while report == nil, child.isAlive, Date() < deadline {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+      }
+      guard let report else {
+        child.kill()
+        return nil
+      }
+      return (child, report)
+    }
+
+    func waitForExit(_ child: ChildProcess, seconds: Double = 5) -> Bool {
+      let deadline = Date().addingTimeInterval(seconds)
+      while child.isAlive, Date() < deadline {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+      }
+      return !child.isAlive
+    }
+
+    guard let (first, launch) = boot() else {
+      print("✗ the first dsh never printed a URL")
+      return 1
+    }
+    print("· pid \(first.pid) serving \(launch.url)")
+    check(PortProbe.probe(port: port) == .dsh, "the port answers as a dsh before the crash")
+
+    var state = HarnessState(snapshot: HarnessSnapshot(phase: .listening, port: port, owner: .dshBar, hasLaunchURL: true))
+    state.retryTarget = RetryTarget(port: port, profile: profile)
+    if !enabled {
+      first.kill()
+      _ = waitForExit(first)
+      let (next, commands) = HarnessReducer.reduce(
+        state,
+        .exited(code: nil, signal: 9),
+        language: .en,
+        autoRestart: false
+      )
+      check(next.snapshot.phase == .failed, "with the watchdog off a crash is just a failure")
+      check(!commands.contains(.scheduleRestart(delay: 1)), "with the watchdog off nothing is scheduled")
+      return report(failures, "watchdog off")
+    }
+
+    // The crash: SIGKILL, so the app cannot have asked for it.
+    first.kill()
+    check(waitForExit(first), "the server died from SIGKILL")
+    let (restarting, commands) = HarnessReducer.reduce(
+      state,
+      .exited(code: nil, signal: 9),
+      language: .en,
+      autoRestart: true
+    )
+    check(restarting.snapshot.phase == .restarting, "the crash enters restarting")
+    check(restarting.snapshot.restartAttempt == 1, "it is the first retry")
+    check(commands.contains(.scheduleRestart(delay: 1)), "the first retry is scheduled one second out")
+    let crashedNotice = NotificationPolicy.event(previous: state.snapshot, next: restarting.snapshot)
+    check(
+      crashedNotice == .crashed(failure: HarnessFailure(kind: .exited(code: nil), detail: "signal 9"), restarting: true, attempt: 1),
+      "the crash is a notification, and it says it is being retried"
+    )
+
+    // The wait, then the same probe → spawn path a hand start uses.
+    _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(TimeInterval(restarting.snapshot.restartDelay ?? 1)))
+    let (due, _) = HarnessReducer.reduce(restarting, .restartDue, language: .en, autoRestart: true)
+    check(due.snapshot.phase == .starting, "the timer starts the server again")
+    let portState = PortProbe.probe(port: port)
+    check(portState == .free, "the port is free again after the SIGKILL")
+    state = due
+
+    guard let (second, relaunch) = boot() else {
+      print("✗ the restart never printed a URL")
+      return report(failures, "watchdog")
+    }
+    print("· pid \(second.pid) restored \(relaunch.url)")
+    let (landed, _) = HarnessReducer.reduce(due, .launch(.ready(relaunch)), language: .en, autoRestart: true)
+    check(landed.snapshot.phase == .listening, "the restart lands back in listening")
+    check(landed.snapshot.restartAttempt == nil, "a successful restart clears the attempt")
+    check(landed.snapshot.port == port, "the restart keeps the port")
+    check(PortProbe.probe(port: port) == .dsh, "the restarted server answers as a dsh")
+
+    // An intentional stop notifies nobody.
+    let (stopping, _) = HarnessReducer.reduce(landed, .stopRequested, language: .en, autoRestart: true)
+    check(
+      NotificationPolicy.event(previous: landed.snapshot, next: stopping.snapshot) == nil,
+      "pressing stop is not a notification"
+    )
+
+    second.terminate()
+    _ = waitForExit(second)
+    check(PortProbe.probe(port: port) == .free, "port \(port) is free again")
+    return report(failures, "watchdog")
+  }
+
+  private static func report(_ failures: [String], _ name: String) -> Int32 {
+    if failures.isEmpty {
+      print("\n✓ \(name) passed")
+      return 0
+    }
+    print("\n✗ \(failures.count) \(name) checks failed")
+    return 1
   }
 
   /// The take-over half of the external-instance flow: start a server the way a

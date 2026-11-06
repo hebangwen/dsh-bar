@@ -16,6 +16,10 @@ public enum HarnessPhase: String, Sendable, Equatable, CaseIterable {
   case listening
   /// SIGTERM was sent and the process has not exited yet.
   case stopping
+  /// The server died while serving and the watchdog is waiting to try again.
+  /// Nothing is running during this phase; `restartAttempt` and `restartDelay`
+  /// say which try it is and how long the wait is.
+  case restarting
   /// The last attempt ended badly; `failure` explains how.
   case failed
 }
@@ -152,6 +156,10 @@ public struct HarnessSnapshot: Sendable, Equatable {
   public var bindHost: String?
   /// `--tls-cert` and `--tls-key` were both sent: the printed URL is https.
   public var secure: Bool
+  /// Which automatic restart this is (1-based), while `.restarting`.
+  public var restartAttempt: Int?
+  /// Seconds the watchdog is waiting before the next spawn.
+  public var restartDelay: Int?
 
   public init(
     phase: HarnessPhase = .stopped,
@@ -168,7 +176,9 @@ public struct HarnessSnapshot: Sendable, Equatable {
     handoff: Bool = false,
     awake: Bool = false,
     bindHost: String? = nil,
-    secure: Bool = false
+    secure: Bool = false,
+    restartAttempt: Int? = nil,
+    restartDelay: Int? = nil
   ) {
     self.phase = phase
     self.host = host
@@ -185,6 +195,8 @@ public struct HarnessSnapshot: Sendable, Equatable {
     self.awake = awake
     self.bindHost = bindHost
     self.secure = secure
+    self.restartAttempt = restartAttempt
+    self.restartDelay = restartDelay
   }
 
   /// What the readout band shows. While serving, the printed URL is the truth (a
@@ -206,10 +218,14 @@ public struct HarnessSnapshot: Sendable, Equatable {
   public var showsLog: Bool {
     switch phase {
     case .listening, .failed: return !log.isEmpty || phase == .failed
-    case .starting, .stopping, .unavailable: return false
+    case .starting, .stopping, .restarting, .unavailable: return false
     case .stopped: return false
     }
   }
+
+  /// True while the watchdog owns the transition: the panel offers Cancel instead
+  /// of Start, because the next spawn is already decided.
+  public var isRestarting: Bool { phase == .restarting }
 
   /// Manual stop is only offered when there is something to stop, and an
   /// externally owned server requires an explicit second click.

@@ -37,6 +37,27 @@ final class LiveBackend: HarnessBackend {
   private let sleepGuard = SleepGuard()
   /// `DSHBAR_SLEEP_POLICY` wins over the preference, for scripted runs.
   private let forcedSleepPolicy = SleepPolicy.forced(from: ProcessInfo.processInfo.environment)
+  /// `DSHBAR_AUTO_RESTART=off` / `DSHBAR_NOTIFY=off` exist for the smoke tool: a
+  /// scripted run should be able to prove the watchdog is silent when switched off.
+  private var forcedAutoRestart: Bool? {
+    switch ProcessInfo.processInfo.environment["DSHBAR_AUTO_RESTART"]?.lowercased() {
+    case "0", "off", "false": return false
+    case "1", "on", "true": return true
+    default: return nil
+    }
+  }
+  private var notificationsForced: Bool? {
+    switch ProcessInfo.processInfo.environment["DSHBAR_NOTIFY"]?.lowercased() {
+    case "0", "off", "false": return false
+    case "1", "on", "true": return true
+    default: return nil
+    }
+  }
+
+  /// The notifier is handed in so the smoke tool can swap in one that only counts.
+  let notifier: CrashNotifier
+  var notificationPermission: NotificationPermission { notifier.permission }
+  var onNotificationPermission: ((NotificationPermission) -> Void)?
 
   /// The flags the running child was actually started with. The panel draws this
   /// while listening, so changing Settings mid-run cannot make the readout claim an
@@ -45,13 +66,19 @@ final class LiveBackend: HarnessBackend {
 
   private var watchTimer: Timer?
   private var readyTimer: Timer?
+  private var restartTimer: Timer?
   private var stopTimer: Timer?
   private var killTimer: Timer?
   private var uptimeTimer: Timer?
 
-  init(language: UILanguage, preferences: BarPreferences) {
+  init(
+    language: UILanguage,
+    preferences: BarPreferences,
+    notifier: CrashNotifier = NotificationCenterClient.system
+  ) {
     self.language = language
     self.preferences = preferences
+    self.notifier = notifier
     var snapshot = Fixtures.snapshot(
       for: .stopped,
       copy: Copy(language: language),
@@ -71,6 +98,16 @@ final class LiveBackend: HarnessBackend {
       guard let self else { return }
       self.writer.note(line)
       self.append(line: "dsh bar: \(line)", stream: .err)
+    }
+    notifier.refreshPermission()
+    // The permission is read once at launch and again when Settings opens; the
+    // prompt itself is only ever raised by the user turning the switch on.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        self.notifier.refreshPermission()
+        self.onNotificationPermission?(self.notifier.permission)
+      }
     }
     startWatching()
     // The first Start should not pay for a shell launch, and a hung rc file must
@@ -208,6 +245,7 @@ final class LiveBackend: HarnessBackend {
   /// Called when the app is quitting. SIGTERM first, then a short wait, because a
   /// killed dsh leaves a session store that the next boot has to repair.
   func shutdown() {
+    notifier.clearDelivered()
     invalidateTimers()
     // Before the process goes: the assertion is about a server that is about to
     // stop, and nothing should be left holding the machine awake.
@@ -226,13 +264,40 @@ final class LiveBackend: HarnessBackend {
   // MARK: - Dispatch
 
   private func dispatch(_ event: HarnessEvent) {
-    let (next, commands) = HarnessReducer.reduce(state, event, language: language)
+    let previous = state.snapshot
+    let (next, commands) = HarnessReducer.reduce(
+      state,
+      event,
+      language: language,
+      autoRestart: forcedAutoRestart ?? preferences.autoRestart
+    )
     state = next
     launchURL = state.launchURL
+    if event == .restartDue || event == .restartAbandoned {
+      writer.note("watchdog: \(event) → \(state.snapshot.phase)")
+    }
     for command in commands {
       perform(command)
     }
     emit()
+    announce(previous: previous, next: state.snapshot)
+  }
+
+  /// The notification side effect, decided by `NotificationPolicy`: a transition
+  /// out of a live state, never a state someone reopened the panel to look at.
+  private func announce(previous: HarnessSnapshot, next: HarnessSnapshot) {
+    guard let event = NotificationPolicy.event(previous: previous, next: next) else { return }
+    if let attempts = state.gaveUpAfter {
+      state.gaveUpAfter = nil
+      writer.note("watchdog: gave up after \(attempts) attempt(s)")
+      notifier.post(.restartGaveUp(attempts: attempts), copy: Copy(language: language), enabled: notificationsEnabled)
+      return
+    }
+    notifier.post(event, copy: Copy(language: language), enabled: notificationsEnabled)
+  }
+
+  private var notificationsEnabled: Bool {
+    notificationsForced ?? preferences.notify
   }
 
   private func emit() {
@@ -330,6 +395,28 @@ final class LiveBackend: HarnessBackend {
 
     case .stopExternal(let port):
       stopExternal(port: port)
+
+    case .scheduleRestart(let delay):
+      restartTimer?.invalidate()
+      let timer = Timer(timeInterval: TimeInterval(delay), repeats: false) { [weak self] _ in
+        MainActor.assumeIsolated {
+          self?.dispatch(.restartDue)
+        }
+      }
+      RunLoop.main.add(timer, forMode: .common)
+      restartTimer = timer
+      writer.note("watchdog: \(state.snapshot.restartAttempt ?? 1)/\(CrashWatchdog.maxAttempts) in \(delay)s")
+
+    case .cancelRestart:
+      restartTimer?.invalidate()
+      restartTimer = nil
+
+    case .restartNow:
+      restartTimer?.invalidate()
+      restartTimer = nil
+      // The whole probe → spawn path, exactly as a hand start: a port that came
+      // back is a different answer than the one that failed a second ago.
+      perform(.probePort(state.snapshot.port))
     }
   }
 
@@ -567,6 +654,34 @@ final class LiveBackend: HarnessBackend {
     }
     RunLoop.main.add(timer, forMode: .common)
     uptimeTimer = timer
+  }
+
+  // MARK: - Notifications
+
+  func refreshNotificationPermission() {
+    notifier.refreshPermission()
+    // The read is asynchronous by nature; the settings row asks again a moment
+    // later rather than showing a spinner for a value it already has.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        self.onNotificationPermission?(self.notifier.permission)
+      }
+    }
+  }
+
+  func requestNotificationAuthorization() {
+    notifier.requestAuthorization()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        self.onNotificationPermission?(self.notifier.permission)
+      }
+    }
+  }
+
+  func clearDeliveredNotifications() {
+    notifier.clearDelivered()
   }
 
   // MARK: - Output
@@ -808,6 +923,8 @@ final class LiveBackend: HarnessBackend {
   var handoffRecord: HandoffRecord? { HandoffStore.load() }
 
   private func invalidateTimers() {
+    restartTimer?.invalidate()
+    restartTimer = nil
     watchTimer?.invalidate()
     readyTimer?.invalidate()
     stopTimer?.invalidate()

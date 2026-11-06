@@ -142,7 +142,7 @@ public struct PanelView: View {
 
   private var primaryIsEnabled: Bool {
     switch snapshot.phase {
-    case .starting, .stopping: return false
+    case .starting, .stopping, .restarting: return false
     default: return !snapshot.busy
     }
   }
@@ -178,8 +178,9 @@ public struct PanelView: View {
         .padding(.bottom, 5)
         tertiaryRow
 
-      case .starting:
-        // The only useful thing while starting is to cancel, so it *is* the action.
+      case .starting, .restarting:
+        // The only useful thing while starting (or waiting out a restart) is to
+        // cancel, so it *is* the action.
         Button { actions(.secondary) } label: {
           Text(copy.cancel)
         }
@@ -260,9 +261,25 @@ public struct PanelView: View {
       LogTail(lines: snapshot.log, copy: copy, palette: palette, maxLines: 3, onOpenLog: { actions(.openLog) })
         .padding(.horizontal, Metrics.pad)
         .padding(.top, Metrics.detailTop + 4)
+    case .restarting:
+      restartNote
     case .stopped, .starting, .stopping, .unavailable:
       EmptyView()
     }
+  }
+
+  /// The watchdog explains itself: why the server is down, which try this is, and
+  /// how long the wait is. Without it, "Restarting…" is indistinguishable from a
+  /// slow start.
+  private var restartNote: some View {
+    Text(copy.restartNote(snapshot))
+      .font(Typography.body)
+      .foregroundStyle(palette.warn)
+      .lineSpacing(3)
+      .fixedSize(horizontal: false, vertical: true)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.horizontal, Metrics.pad)
+      .padding(.top, Metrics.detailTop)
   }
 
   private var externalNote: some View {

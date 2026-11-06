@@ -45,6 +45,12 @@ public struct BarPreferences: Sendable, Equatable {
   public var tlsKeyPath: String?
   /// `dsh --patch`, repeatable: extra overlay files applied after the profile layer.
   public var patchPaths: [String]
+  /// Restart a server that dies while serving. Bounded by `CrashWatchdog`; a
+  /// manual Start resets the budget.
+  public var autoRestart: Bool
+  /// Post a system notification on a start failure, a crash, a give-up or a failed
+  /// stop. Off means the panel is the only place that reports.
+  public var notify: Bool
 
   public enum Key {
     public static let binaryPath = "dshBinaryPath"
@@ -62,6 +68,8 @@ public struct BarPreferences: Sendable, Equatable {
     public static let tlsCertPath = "dshTLSCertPath"
     public static let tlsKeyPath = "dshTLSKeyPath"
     public static let patchPaths = "dshPatchPaths"
+    public static let autoRestart = "dshAutoRestart"
+    public static let notify = "dshNotify"
   }
 
   public static let defaultPort = 3080
@@ -86,7 +94,9 @@ public struct BarPreferences: Sendable, Equatable {
     trustedHosts: [String] = [],
     tlsCertPath: String? = nil,
     tlsKeyPath: String? = nil,
-    patchPaths: [String] = []
+    patchPaths: [String] = [],
+    autoRestart: Bool = true,
+    notify: Bool = true
   ) {
     self.binaryPath = Self.normalizeBinaryPath(binaryPath)
     self.port = Self.normalizePort(port)
@@ -103,6 +113,8 @@ public struct BarPreferences: Sendable, Equatable {
     self.tlsCertPath = Self.normalizeFilePath(tlsCertPath)
     self.tlsKeyPath = Self.normalizeFilePath(tlsKeyPath)
     self.patchPaths = Self.normalizePaths(patchPaths)
+    self.autoRestart = autoRestart
+    self.notify = notify
   }
 
   /// 0 means "auto"; anything outside 1...65535 falls back to the default.
@@ -256,7 +268,11 @@ public struct BarPreferences: Sendable, Equatable {
       trustedHosts: defaults.stringArray(forKey: Key.trustedHosts) ?? [],
       tlsCertPath: defaults.string(forKey: Key.tlsCertPath),
       tlsKeyPath: defaults.string(forKey: Key.tlsKeyPath),
-      patchPaths: defaults.stringArray(forKey: Key.patchPaths) ?? []
+      patchPaths: defaults.stringArray(forKey: Key.patchPaths) ?? [],
+      // 0.6.0 domains have neither key; both defaults are the new behaviour, and
+      // both are visible and switchable in Settings › Behavior.
+      autoRestart: defaults.object(forKey: Key.autoRestart) as? Bool ?? true,
+      notify: defaults.object(forKey: Key.notify) as? Bool ?? true
     )
   }
 
@@ -276,6 +292,10 @@ public struct BarPreferences: Sendable, Equatable {
     Self.store(tlsKeyPath, key: Key.tlsKeyPath, in: defaults)
     Self.store(trustedHosts, key: Key.trustedHosts, in: defaults)
     Self.store(patchPaths, key: Key.patchPaths, in: defaults)
+    // `set(_:forKey:)` picks the type from the static one; assigning a `Bool?`
+    // after promotion would store an integer, which `as? Bool` never reads back.
+    defaults.set(autoRestart, forKey: Key.autoRestart)
+    defaults.set(notify, forKey: Key.notify)
   }
 
   private static func store(_ values: [String], key: String, in defaults: UserDefaults) {

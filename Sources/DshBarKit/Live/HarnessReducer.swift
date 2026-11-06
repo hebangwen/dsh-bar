@@ -20,6 +20,20 @@ public struct HarnessState: Sendable, Equatable {
   public var pendingDetail: String?
   /// What the locator tried, for the "not found" panel.
   public var searched: [String]
+  /// When the last unexpected exit happened. Set once the crash decision is made.
+  public var lastCrashAt: Date?
+  /// When the watchdog has already decided to act on a crash, so the second
+  /// `.exited` of the same crash (a queued signal) cannot restart twice.
+  public var crashHandled: Bool
+  /// Port and profile for the next automatic spawn. Nil when there is nothing to
+  /// restart (the server was started by hand from a terminal).
+  public var retryTarget: RetryTarget?
+  /// Attempts inside `CrashWatchdog.window`, newest last.
+  public var attempts: [Date]
+  /// True when the start in flight is the watchdog's, so the attempts survive it.
+  public var retrying: Bool
+  /// How many attempts the last give-up used, for the notification.
+  public var gaveUpAfter: Int?
 
   public init(snapshot: HarnessSnapshot = HarnessSnapshot()) {
     self.snapshot = snapshot
@@ -29,6 +43,24 @@ public struct HarnessState: Sendable, Equatable {
     self.announced = false
     self.pendingDetail = nil
     self.searched = []
+    self.lastCrashAt = nil
+    self.crashHandled = false
+    self.retryTarget = nil
+    self.attempts = []
+    self.retrying = false
+    self.gaveUpAfter = nil
+  }
+}
+
+/// What the watchdog would spawn next. A struct, not a tuple: `HarnessState` is
+/// `Equatable` and the reducer's "nothing changed" answers depend on it.
+public struct RetryTarget: Sendable, Equatable {
+  public var port: Int
+  public var profile: String
+
+  public init(port: Int, profile: String) {
+    self.port = port
+    self.profile = profile
   }
 }
 
@@ -58,6 +90,10 @@ public enum HarnessEvent: Sendable, Equatable {
   case readyTimeout(seconds: Int)
   case tick
   case reset
+  /// The watchdog's timer: spawn again, or stop for good when it is out of budget.
+  case restartDue
+  /// The watchdog is switched off, or the user pressed Cancel during a restart.
+  case restartAbandoned
 }
 
 /// What the controller should do about it. The reducer never touches a process;
@@ -73,6 +109,12 @@ public enum HarnessCommand: Sendable, Equatable {
   case kill
   case stopExternal(port: Int)
   case writeLogSeparator
+  /// Wait, then send `.restartDue`.
+  case scheduleRestart(delay: Int)
+  case cancelRestart
+  /// Spawn at once for the watchdog: port 0 skips the probe, anything else probes
+  /// first, exactly like a hand start.
+  case restartNow(port: Int)
 }
 
 public enum HarnessReducer {
@@ -82,11 +124,14 @@ public enum HarnessReducer {
   /// SIGTERM gets five seconds before SIGKILL: dsh closes its store cleanly.
   public static let stopGrace = 5
 
+  /// - Parameter autoRestart: the preference, read by the caller so the reducer
+  ///   stays a pure function of what it is told.
   public static func reduce(
     _ state: HarnessState,
     _ event: HarnessEvent,
     language: UILanguage,
-    now: Date = Date()
+    now: Date = Date(),
+    autoRestart: Bool = true
   ) -> (HarnessState, [HarnessCommand]) {
     var next = state
     var commands: [HarnessCommand] = []
@@ -114,7 +159,10 @@ public enum HarnessReducer {
       commands = [.stopUptime, .disarmReadyTimeout]
 
     case .start(let port, let profile):
-      guard [.stopped, .failed, .unavailable].contains(next.snapshot.phase) else {
+      // Starting by hand while the watchdog is waiting is allowed and beats the
+      // timer: the user's decision replaces a scheduled retry, and the budget
+      // starts over.
+      guard [.stopped, .failed, .unavailable, .restarting].contains(next.snapshot.phase) else {
         return (state, [])
       }
       next.snapshot.phase = .starting
@@ -133,6 +181,14 @@ public enum HarnessReducer {
       next.intentionalStop = false
       next.announced = false
       next.pendingDetail = nil
+      // A hand-started server is the user's decision, and it starts a fresh crash
+      // budget: "it was fine after I looked at it" should not be punished.
+      next.crashHandled = false
+      next.attempts = []
+      next.snapshot.restartAttempt = nil
+      next.snapshot.restartDelay = nil
+      next.retrying = false
+      next.retryTarget = RetryTarget(port: port, profile: profile)
       commands = [.writeLogSeparator]
       // Port 0 asks the OS to pick one, so there is nothing to check first.
       if port == BarPreferences.autoPort {
@@ -224,6 +280,10 @@ public enum HarnessReducer {
         next.snapshot.failure = nil
         next.launchURL = report.url
         next.startedAt = now
+        next.retrying = false
+        next.crashHandled = false
+        next.snapshot.restartAttempt = nil
+        next.snapshot.restartDelay = nil
         commands = [.disarmReadyTimeout, .startUptime]
 
       case .portInUse(let port):
@@ -262,13 +322,43 @@ public enum HarnessReducer {
         next.intentionalStop = false
         commands = [.stopUptime, .disarmReadyTimeout]
       case .listening:
-        next.snapshot.phase = .failed
-        next.snapshot.failure = HarnessFailure(
+        let failure = HarnessFailure(
           kind: .exited(code: signal == nil ? code : nil),
           detail: next.pendingDetail ?? (signal.map { "signal \($0)" })
         )
         next.snapshot.lastRun = justNow(language)
+        next.snapshot.hasLaunchURL = false
         commands = [.stopUptime, .disarmReadyTimeout]
+        if autoRestart, !next.crashHandled, let target = next.retryTarget {
+          next.crashHandled = true
+          next.lastCrashAt = now
+          switch CrashWatchdog.decide(attempts: next.attempts, now: now) {
+          case .restart(let attempt, let delay):
+            next.attempts.append(now)
+            next.snapshot.phase = .restarting
+            next.snapshot.failure = failure
+            next.snapshot.busy = true
+            next.snapshot.restartAttempt = attempt
+            next.snapshot.restartDelay = delay
+            next.snapshot.port = target.port
+            next.snapshot.profile = target.profile
+            next.launchURL = nil
+            next.startedAt = nil
+            next.announced = false
+            next.intentionalStop = false
+            commands.append(.scheduleRestart(delay: delay))
+          case .giveUp(let attempts):
+            next.snapshot.phase = .failed
+            next.snapshot.failure = failure
+            next.snapshot.busy = false
+            next.snapshot.restartAttempt = nil
+            next.snapshot.restartDelay = nil
+            next.gaveUpAfter = attempts
+          }
+        } else {
+          next.snapshot.phase = .failed
+          next.snapshot.failure = failure
+        }
       case .starting:
         next.snapshot.phase = .failed
         next.snapshot.failure = HarnessFailure(
@@ -277,7 +367,7 @@ public enum HarnessReducer {
         )
         next.pendingDetail = nil
         commands = [.disarmReadyTimeout, .stopUptime]
-      case .stopped, .failed, .unavailable:
+      case .stopped, .failed, .unavailable, .restarting:
         commands = [.stopUptime, .disarmReadyTimeout]
       }
 
@@ -312,7 +402,13 @@ public enum HarnessReducer {
       commands = [.kill]
 
     case .cancel:
-      guard next.snapshot.phase == .starting else { return (state, []) }
+      guard next.snapshot.phase == .starting || next.snapshot.phase == .restarting else {
+        return (state, [])
+      }
+      let wasRestarting = next.snapshot.phase == .restarting
+      next.snapshot.restartAttempt = nil
+      next.snapshot.restartDelay = nil
+      next.retrying = false
       next.snapshot.phase = .stopped
       next.snapshot.busy = false
       next.snapshot.uptime = nil
@@ -322,7 +418,7 @@ public enum HarnessReducer {
       next.startedAt = nil
       next.announced = false
       next.intentionalStop = true
-      commands = [.disarmReadyTimeout, .terminate]
+      commands = wasRestarting ? [.cancelRestart, .disarmReadyTimeout] : [.disarmReadyTimeout, .terminate]
 
     case .readyTimeout(let seconds):
       guard next.snapshot.phase == .starting else { return (state, []) }
@@ -331,6 +427,38 @@ public enum HarnessReducer {
       next.snapshot.failure = HarnessFailure(kind: .timeout(seconds: seconds))
       next.snapshot.hasLaunchURL = false
       commands = [.disarmReadyTimeout, .terminate]
+
+    case .restartDue:
+      guard next.snapshot.phase == .restarting, let target = next.retryTarget else {
+        return (state, [])
+      }
+      // Same shape as a start, minus the budget reset: the panel keeps saying
+      // "Starting…" with the attempt in the readout, and the port is probed again
+      // in case whatever held it has let go.
+      next.retrying = true
+      next.snapshot.phase = .starting
+      next.snapshot.busy = true
+      next.snapshot.hasLaunchURL = false
+      next.snapshot.uptime = nil
+      next.snapshot.log = []
+      next.snapshot.port = target.port
+      next.snapshot.profile = target.profile
+      next.snapshot.restartDelay = nil
+      next.launchURL = nil
+      next.startedAt = nil
+      next.intentionalStop = false
+      next.announced = false
+      next.pendingDetail = nil
+      commands = [.writeLogSeparator, .restartNow(port: target.port)]
+
+    case .restartAbandoned:
+      guard next.snapshot.phase == .restarting else { return (state, []) }
+      next.snapshot.phase = .failed
+      next.snapshot.busy = false
+      next.snapshot.restartAttempt = nil
+      next.snapshot.restartDelay = nil
+      next.crashHandled = true
+      commands = [.cancelRestart]
 
     case .tick:
       guard let started = next.startedAt, next.snapshot.phase == .listening else {

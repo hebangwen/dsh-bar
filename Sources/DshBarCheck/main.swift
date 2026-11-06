@@ -130,6 +130,7 @@ func runChecks() -> Int32 {
     .listeningHandoff: .listening,
     .listeningLAN: .listening,
     .failedFlags: .failed,
+    .restarting: .restarting,
   ]
   for scene in DemoScene.allCases {
     checks.equal(Fixtures.snapshot(for: scene, copy: en).phase, expected[scene] ?? .failed, "\(scene) phase")
@@ -438,11 +439,15 @@ func runChecks() -> Int32 {
     .exited(code: 1, signal: nil),
     language: .en
   )
-  checks.equal(crashState.snapshot.phase, .failed, "a crash after ready fails")
+  checks.equal(crashState.snapshot.phase, .restarting, "a crash after ready hands over to the watchdog")
   checks.equal(crashState.snapshot.failure?.kind, .exited(code: 1), "the crash keeps its code")
   checks.equal(crashState.snapshot.lastRun, "just now", "the crash records when it ran")
   checks.check(!crashState.snapshot.hasLaunchURL, "a crash loses the URL")
-  checks.equal(crashCommands, [.stopUptime, .disarmReadyTimeout], "a crash stops the clock")
+  checks.equal(
+    crashCommands,
+    [.stopUptime, .disarmReadyTimeout, .scheduleRestart(delay: 1)],
+    "a crash stops the clock and schedules the first retry"
+  )
 
   let (startFailState, _) = HarnessReducer.reduce(
     state,
@@ -1951,6 +1956,246 @@ func runChecks() -> Int32 {
     PortProbe.numericAddress("example.com", port: 3080) == nil,
     "a host name does not resolve numerically"
   )
+
+  // MARK: - 0.7.0 · crash watchdog
+
+  let w0 = Date(timeIntervalSince1970: 1_800_000_000)
+  checks.equal(CrashWatchdog.delay(attempt: 1), 1, "the first retry is one second")
+  checks.equal(CrashWatchdog.delay(attempt: 2), 2, "the second retry backs off")
+  checks.equal(CrashWatchdog.delay(attempt: 3), 4, "the third retry backs off")
+  checks.equal(CrashWatchdog.delay(attempt: 4), 8, "the fourth retry hits the cap")
+  checks.equal(CrashWatchdog.delay(attempt: 9), 8, "the cap holds")
+  checks.equal(CrashWatchdog.decide(attempts: [], now: w0), .restart(attempt: 1, delay: 1), "a fresh budget restarts at once")
+  checks.equal(
+    CrashWatchdog.decide(attempts: [w0.addingTimeInterval(-5)], now: w0),
+    .restart(attempt: 2, delay: 2),
+    "a second crash inside the window counts"
+  )
+  checks.equal(
+    CrashWatchdog.decide(
+      attempts: [w0.addingTimeInterval(-30), w0.addingTimeInterval(-20), w0.addingTimeInterval(-10)],
+      now: w0
+    ),
+    .giveUp(attempts: 3),
+    "three attempts inside the window exhaust the budget"
+  )
+  checks.equal(
+    CrashWatchdog.decide(
+      attempts: [w0.addingTimeInterval(-300), w0.addingTimeInterval(-280), w0.addingTimeInterval(-260)],
+      now: w0
+    ),
+    .restart(attempt: 1, delay: 1),
+    "old attempts fall out of the window"
+  )
+  checks.equal(
+    CrashWatchdog.decide(
+      attempts: [w0.addingTimeInterval(-300), w0.addingTimeInterval(-200), w0.addingTimeInterval(-100)],
+      now: w0
+    ),
+    .restart(attempt: 2, delay: 2),
+    "an attempt outside the window stops counting, the one inside still does"
+  )
+  checks.equal(CrashWatchdog.recentAttempts([w0.addingTimeInterval(-400)], now: w0).count, 0, "recentAttempts filters")
+
+  // The reducer: listening → crash → restarting → starting → listening.
+  let watchBase = HarnessState(
+    snapshot: HarnessSnapshot(phase: .listening, port: 3080, owner: .dshBar, hasLaunchURL: true)
+  )
+  let retryTarget = RetryTarget(port: 3080, profile: "web")
+  var watching = watchBase
+  watching.retryTarget = retryTarget
+  let (crash1, crash1Commands) = HarnessReducer.reduce(
+    watching,
+    .exited(code: 1, signal: nil),
+    language: .en,
+    now: w0
+  )
+  checks.equal(crash1.snapshot.phase, .restarting, "a crash while serving enters restarting")
+  checks.equal(crash1.snapshot.restartAttempt, 1, "the first retry is attempt 1")
+  checks.equal(crash1.snapshot.restartDelay, 1, "the first retry waits one second")
+  checks.equal(crash1.attempts.count, 1, "the attempt is remembered")
+  checks.equal(crash1.snapshot.owner, .dshBar, "the retry keeps the owner")
+  checks.check(crash1.snapshot.busy, "a restart is busy")
+  checks.check(crash1.snapshot.isRestarting, "the snapshot knows it is restarting")
+  checks.check(!crash1.snapshot.showsLog, "a restarting panel shows no log tail")
+  checks.equal(
+    crash1Commands,
+    [.stopUptime, .disarmReadyTimeout, .scheduleRestart(delay: 1)],
+    "the first crash schedules the first retry"
+  )
+  checks.equal(
+    HarnessReducer.reduce(crash1, .restartDue, language: .en, now: w0).0.snapshot.phase,
+    .starting,
+    "the timer starts the server again"
+  )
+  let (dueState, dueCommands) = HarnessReducer.reduce(crash1, .restartDue, language: .en, now: w0)
+  checks.equal(dueCommands, [.writeLogSeparator, .restartNow(port: 3080)], "a retry writes a separator and asks to spawn")
+  checks.equal(dueState.snapshot.restartAttempt, 1, "the attempt number survives into the start")
+  checks.equal(dueState.snapshot.restartDelay, nil, "the delay is cleared once the wait is over")
+  checks.check(dueState.retrying, "the start is the watchdog's")
+
+  let relaunched = LaunchReport(url: "http://127.0.0.1:3080/?token=t", host: "127.0.0.1", port: 3080, token: "t")
+  let (landed, _) = HarnessReducer.reduce(dueState, .launch(.ready(relaunched)), language: .en, now: w0)
+  checks.equal(landed.snapshot.phase, .listening, "a successful retry is listening again")
+  checks.equal(landed.snapshot.restartAttempt, nil, "a successful retry clears the attempt")
+  checks.check(!landed.snapshot.busy, "a successful retry stops being busy")
+
+  // A start by hand starts a fresh budget.
+  let (manual, _) = HarnessReducer.reduce(
+    crash1,
+    .start(port: 3080, profile: "web"),
+    language: .en,
+    now: w0.addingTimeInterval(3)
+  )
+  checks.equal(manual.attempts, [], "a manual start resets the crash budget")
+  checks.equal(manual.snapshot.phase, .starting, "a manual start from a pending restart starts")
+  checks.equal(manual.snapshot.restartAttempt, nil, "a manual start is not a retry")
+
+  // A crash during startup is a failure, not a watchdog job.
+  let startingState = HarnessState(snapshot: HarnessSnapshot(phase: .starting, port: 3080))
+  let (startupCrash, startupCommands) = HarnessReducer.reduce(
+    startingState,
+    .exited(code: 1, signal: nil),
+    language: .en,
+    now: w0
+  )
+  checks.equal(startupCrash.snapshot.phase, .failed, "a crash during startup fails the start")
+  checks.check(!startupCommands.contains(.scheduleRestart(delay: 1)), "a startup crash schedules no retry")
+
+  // Auto restart off: the same crash lands in failed.
+  let (noRestart, noRestartCommands) = HarnessReducer.reduce(
+    watching,
+    .exited(code: 1, signal: nil),
+    language: .en,
+    now: w0,
+    autoRestart: false
+  )
+  checks.equal(noRestart.snapshot.phase, .failed, "with the watchdog off a crash just fails")
+  checks.check(!noRestartCommands.contains(.scheduleRestart(delay: 1)), "with the watchdog off nothing is scheduled")
+
+  // Cancel during a restart: stopped, nothing spawns.
+  let (cancelled, watchdogCancelCommands) = HarnessReducer.reduce(crash1, .cancel, language: .en, now: w0)
+  checks.equal(cancelled.snapshot.phase, .stopped, "cancel during a restart stops")
+  checks.equal(watchdogCancelCommands, [.cancelRestart, .disarmReadyTimeout], "cancel tears the timer down")
+  checks.equal(cancelled.snapshot.restartAttempt, nil, "cancel clears the attempt")
+  checks.equal(
+    HarnessReducer.reduce(cancelled, .restartDue, language: .en, now: w0).0.snapshot.phase,
+    .stopped,
+    "a late timer cannot start a cancelled restart"
+  )
+  let (abandoned, abandonCommands) = HarnessReducer.reduce(crash1, .restartAbandoned, language: .en, now: w0)
+  checks.equal(abandoned.snapshot.phase, .failed, "abandoning a restart fails")
+  checks.equal(abandonCommands, [.cancelRestart], "abandoning cancels the timer")
+
+  // The budget runs out.
+  var spent = watching
+  spent.attempts = [w0.addingTimeInterval(-3), w0.addingTimeInterval(-2), w0.addingTimeInterval(-1)]
+  let (gaveUp, gaveUpCommands) = HarnessReducer.reduce(spent, .exited(code: 1, signal: nil), language: .en, now: w0)
+  checks.equal(gaveUp.snapshot.phase, .failed, "an exhausted budget fails")
+  checks.equal(gaveUp.gaveUpAfter, 3, "the give-up records how many tries it made")
+  checks.equal(gaveUp.snapshot.restartAttempt, nil, "a give-up clears the attempt")
+  checks.check(!gaveUpCommands.contains(.scheduleRestart(delay: 1)), "a give-up schedules nothing")
+
+  // A second exit for the same crash cannot restart twice.
+  let (twice, twiceCommands) = HarnessReducer.reduce(crash1, .exited(code: 1, signal: nil), language: .en, now: w0)
+  checks.equal(twice.snapshot.phase, .restarting, "the restarting state survives a duplicate exit")
+  checks.equal(twiceCommands, [.stopUptime, .disarmReadyTimeout], "a duplicate exit schedules nothing")
+
+  // Copy for the state.
+  checks.equal(en.stateWord(.restarting), "Restarting…", "en restarting word")
+  checks.equal(zh.stateWord(.restarting), "正在重启…", "zh restarting word")
+  checks.equal(en.duration(0), "up 0s", "duration still formats")
+  checks.equal(
+    en.readoutSide(Fixtures.snapshot(for: .restarting, copy: en)),
+    "retry 2 · in 4s",
+    "en restart readout names the attempt and the wait"
+  )
+  checks.check(
+    zh.readoutSide(Fixtures.snapshot(for: .restarting, copy: zh))?.contains("第 2 次") == true,
+    "zh restart readout names the attempt"
+  )
+  checks.check(
+    en.restartNote(Fixtures.snapshot(for: .restarting, copy: en)).contains("Restart 2 of 3"),
+    "en restart note spells out the budget"
+  )
+  checks.check(
+    zh.restartNote(Fixtures.snapshot(for: .restarting, copy: zh)).contains("共 3 次"),
+    "zh restart note spells out the budget"
+  )
+  checks.equal(en.secondaryLabel(Fixtures.snapshot(for: .restarting, copy: en)), "Cancel", "a restart can be cancelled")
+  checks.equal(zh.primaryLabel(Fixtures.snapshot(for: .restarting, copy: zh)), "正在重启…", "zh restarting primary label")
+
+  // MARK: - 0.7.0 · notifications
+
+  let live = HarnessSnapshot(phase: .listening, port: 3080, owner: .dshBar, hasLaunchURL: true)
+  let crashed = HarnessSnapshot(phase: .failed, failure: HarnessFailure(kind: .exited(code: 1)))
+  let startingFixture = HarnessSnapshot(phase: .starting)
+  let stoppingFixture = HarnessSnapshot(phase: .stopping)
+  checks.equal(NotificationPolicy.event(previous: startingFixture, next: crashed), .startFailed(HarnessFailure(kind: .exited(code: 1))), "a failed start notifies")
+  checks.equal(
+    NotificationPolicy.event(previous: live, next: crashed),
+    .crashed(failure: HarnessFailure(kind: .exited(code: 1)), restarting: false, attempt: nil),
+    "a crash notifies"
+  )
+  checks.equal(
+    NotificationPolicy.event(previous: live, next: crash1.snapshot),
+    .crashed(failure: HarnessFailure(kind: .exited(code: 1)), restarting: true, attempt: 1),
+    "a crash the watchdog will retry says so"
+  )
+  checks.equal(
+    NotificationPolicy.event(previous: crash1.snapshot, next: gaveUp.snapshot),
+    .restartGaveUp(attempts: 1),
+    "a give-up notifies"
+  )
+  checks.equal(
+    NotificationPolicy.event(previous: stoppingFixture, next: crashed),
+    .stopFailed(HarnessFailure(kind: .exited(code: 1))),
+    "a failed stop notifies"
+  )
+  checks.equal(NotificationPolicy.event(previous: live, next: live), nil, "no change, no notification")
+  checks.equal(
+    NotificationPolicy.event(previous: HarnessSnapshot(phase: .stopped), next: crashed),
+    nil,
+    "a panel reopened on a failure stays quiet"
+  )
+  checks.equal(
+    NotificationPolicy.event(previous: live, next: HarnessSnapshot(phase: .stopping)),
+    nil,
+    "pressing stop does not notify"
+  )
+  checks.equal(NotificationPolicy.identifier(.startFailed(HarnessFailure(kind: .timeout(seconds: 30)))), "dev.dsh.bar.start-failed", "a failed start replaces its own notification")
+  checks.equal(
+    NotificationPolicy.identifier(.crashed(failure: HarnessFailure(kind: .exited(code: 1)), restarting: true, attempt: 2)),
+    "dev.dsh.bar.crashed",
+    "crash notifications share one identifier"
+  )
+  checks.check(en.notificationTitle(.crashed(failure: .init(kind: .exited(code: 1)), restarting: true, attempt: 1)).contains("restarting"), "en crash title says restarting")
+  checks.check(zh.notificationTitle(.restartGaveUp(attempts: 3)).contains("已停止"), "zh give-up title")
+  checks.check(zh.notificationBody(.restartGaveUp(attempts: 3)).contains("3"), "zh give-up body names the budget")
+  checks.check(en.notificationBody(.startFailed(.init(kind: .portInUse(port: 3099)))).contains("3099"), "en failure body reuses the diagnosis")
+  checks.equal(en.notificationState(.allowed), "allowed", "en allowed")
+  checks.equal(zh.notificationState(.denied), "已被系统拒绝", "zh denied")
+  checks.equal(en.notificationState(.notDetermined), "not asked yet", "en not asked")
+  checks.equal(en.notificationState(.unavailable), "unavailable", "en unavailable")
+
+  // The preferences round-trip.
+  let watchdogSuite = "dev.dsh.bar.check.watchdog.\(UUID().uuidString)"
+  if let domain = UserDefaults(suiteName: watchdogSuite) {
+    let fresh = BarPreferences.load(from: domain)
+    checks.check(fresh.autoRestart, "a fresh domain restarts after a crash")
+    checks.check(fresh.notify, "a fresh domain notifies")
+    var off = fresh
+    off.autoRestart = false
+    off.notify = false
+    off.save(to: domain)
+    let reloaded = BarPreferences.load(from: domain)
+    checks.check(!reloaded.autoRestart, "the watchdog switch survives")
+    checks.check(!reloaded.notify, "the notification switch survives")
+    checks.equal(reloaded.replacing(port: 3099).autoRestart, false, "changing the port keeps the watchdog setting")
+    domain.removePersistentDomain(forName: watchdogSuite)
+  } else {
+    checks.check(false, "a throwaway defaults domain could not be created")
+  }
 
   return checks.report()
 }

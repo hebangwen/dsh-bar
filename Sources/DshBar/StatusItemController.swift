@@ -346,7 +346,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     switch model.snapshot.phase {
     case .unavailable: return .unavailable
     case .stopped: return .stopped
-    case .starting: return .starting
+    case .starting, .restarting: return .starting
     case .stopping: return .stopping
     case .failed: return model.snapshot.failure?.port == nil ? .failedExit : .failedPort
     case .listening: return model.snapshot.owner == .external ? .listeningExternal : .listening

@@ -47,7 +47,7 @@ public struct RingLamp: View {
     self.palette = palette
   }
 
-  private var isStarting: Bool { phase == .starting }
+  private var isStarting: Bool { phase == .starting || phase == .restarting }
 
   public var body: some View {
     ZStack {
@@ -61,7 +61,7 @@ public struct RingLamp: View {
         Circle()
           .strokeBorder(palette.ink.opacity(0.38), lineWidth: 1.3)
           .frame(width: 8.5, height: 8.5)
-      case .starting:
+      case .starting, .restarting:
         Circle()
           .strokeBorder(palette.warn.opacity(0.3), lineWidth: 1)
           .frame(width: 13, height: 13)

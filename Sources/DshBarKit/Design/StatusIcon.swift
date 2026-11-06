@@ -19,7 +19,7 @@ public enum StatusIcon {
         dashedRing(center: center, radius: 5.6, width: 1.5, dash: [1.4, 2.0])
       case .stopped:
         ring(center: center, radius: 5.6, width: 1.5)
-      case .starting:
+      case .starting, .restarting:
         arc(center: center, radius: 5.2, width: 1.6, start: 0, sweep: 265)
       case .listening:
         ring(center: center, radius: 5.6, width: 1.5)
@@ -75,7 +75,7 @@ public enum StatusIcon {
   /// review sheets draw, so what is reviewed stays true to what ships.
   public static func frames(for phase: HarnessPhase, owner: ServerOwner) -> [NSImage]? {
     switch phase {
-    case .starting:
+    case .starting, .restarting:
       return (0..<frameCount).map { index in
         let start = Double(index) * 360 / Double(frameCount)
         return rasterized(icon { center in

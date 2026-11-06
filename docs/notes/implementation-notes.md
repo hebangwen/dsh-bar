@@ -113,6 +113,18 @@ DSHBAR_DOCUMENTS_FOLDER=/tmp/somewhere ...                # 换目标文件夹�
 
 另外两条与 TLS 有关的事实：证书和私钥必须成对（单边直接诊断，不 spawn）；TLS 打开后明文探针拿到的是 TLS 记录而不是 401，所以端口上的外部实例只能判「被占用」，不能「接管」——设置里如实写。
 
+## 崩溃守护的四个坑
+
+1. **同一个崩溃会到两条 `.exited`。** 信号退出和退出码是两条路，没有 `crashHandled` 标记就会重启两次、预算一次少两个。
+2. **`(port: Int, profile: String)?` 会让 `HarnessState` 不再是 `Equatable`。** reducer 里所有「没变化就原样返回 `state`」的判断都依赖它，所以 `retryTarget` 是一个结构体。
+3. **`.restartDue` 要重新探端口。** 被杀到重启之间端口可能被别人占了；直接 spawn 会把 `EADDRINUSE` 变成一条新的启动失败，而探一次只多 300 ms。
+4. **`defaults.set(Bool?, forKey:)` 存的是整数。** 把 `Bool` 隐式提升成 `Any?` 再写进去，`as? Bool` 永远读回 nil——两个开关看起来存住了，重启就丢。显式传 `Bool`。
+
+## 通知的两个前提
+
+- **`UNUserNotificationCenter.current()` 在非 bundle 进程里会抛异常。** `dshbar-check` / `dshbar-smoke` 是裸可执行文件，所以整个通知面藏在一个协议后面，`isBundled == false` 时 `permission == .unavailable`、`post` 只记账。
+- **只在「转换」上推。** `NotificationPolicy.event(previous:next:)` 看的是相位对：`.listening → .failed` 是崩溃，`.starting → .failed` 是启动失败，`.stopping → .failed` 是停止失败；`.stopped → .failed` 什么都不推——那是面板被重新打开时看到的旧状态。
+
 ## 防止休眠的三条硬事实
 
 1. **`-i` 是唯一被允许的开关。** `-d` 会连屏幕一起点亮，`-u` 声明用户活跃（同样重置显示器计时器），`-s` 只在电源适配器下有效而范围更宽，`-m` 管的是磁盘。四条不使用写进 `Caffeinate.forbiddenFlags`，`dshbar-check` 逐条断言不出现。

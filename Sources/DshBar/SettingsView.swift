@@ -650,6 +650,60 @@ struct SettingsView: View {
       } else {
         note(copy.shortcutNote)
       }
+
+      Divider().padding(.vertical, 2)
+
+      row(copy.autoRestartField) {
+        if isSnapshot {
+          snapshotToggle(on: model.preferences.autoRestart)
+        } else {
+          Toggle(
+            "",
+            isOn: Binding(
+              get: { model.preferences.autoRestart },
+              set: { model.update(autoRestart: $0) }
+            )
+          )
+          .labelsHidden()
+          .toggleStyle(.switch)
+          .controlSize(.small)
+        }
+        Spacer(minLength: 0)
+      }
+      note(copy.autoRestartNote)
+
+      row(copy.notifyField) {
+        if isSnapshot {
+          snapshotToggle(on: model.preferences.notify)
+        } else {
+          Toggle(
+            "",
+            isOn: Binding(
+              get: { model.preferences.notify },
+              set: { model.update(notify: $0) }
+            )
+          )
+          .labelsHidden()
+          .toggleStyle(.switch)
+          .controlSize(.small)
+        }
+
+        Text(copy.notificationState(model.notificationPermission))
+          .font(.system(size: 10.5, design: .monospaced))
+          .foregroundStyle(notificationStyle)
+          .fixedSize()
+
+        Spacer(minLength: 8)
+        if model.notificationPermission == .denied, !isSnapshot {
+          Button(copy.openNotificationSettings) { model.openNotificationSettings() }
+            .controlSize(.small)
+        }
+      }
+      if model.notificationPermission == .denied {
+        note(copy.notificationDeniedNote, tone: palette.fail)
+      } else {
+        note(copy.notifyNote)
+      }
     }
     .settingsPane(padding: SettingsMetrics.panePadding)
   }
@@ -757,6 +811,17 @@ struct SettingsView: View {
     case .unavailable: return palette.fail
     case .failed: return palette.warn
     case .idle, .asserting: return nil
+    }
+  }
+
+  /// Denied is the only state that needs a colour: it is the one the user has to
+  /// fix somewhere else.
+  private var notificationStyle: AnyShapeStyle {
+    switch model.notificationPermission {
+    case .allowed: return AnyShapeStyle(.secondary)
+    case .denied: return AnyShapeStyle(palette.fail)
+    case .notDetermined: return AnyShapeStyle(palette.warn)
+    case .unknown, .unavailable: return AnyShapeStyle(.tertiary)
     }
   }
 

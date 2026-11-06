@@ -30,6 +30,13 @@ protocol HarnessBackend: AnyObject {
   /// Whether the idle-sleep assertion is held right now, and why not when it is not.
   var sleepStatus: SleepGuardStatus { get }
   var onSleepStatus: ((SleepGuardStatus) -> Void)? { get set }
+  /// What the system allows this app to say out loud.
+  var notificationPermission: NotificationPermission { get }
+  var onNotificationPermission: ((NotificationPermission) -> Void)? { get set }
+  func refreshNotificationPermission()
+  /// Asks the system once; a no-op when it was answered already.
+  func requestNotificationAuthorization()
+  func clearDeliveredNotifications()
 }
 
 enum AppearanceOverride: String, CaseIterable, Identifiable {
@@ -89,6 +96,8 @@ final class HarnessModel: ObservableObject {
   /// The caffeinate process the backend is holding, as the system sees it — not as
   /// the preference asked for.
   @Published private(set) var sleepStatus: SleepGuardStatus = .idle
+  /// What the system says about notifications, as of the last read.
+  @Published private(set) var notificationPermission: NotificationPermission = .unknown
   @Published var appearance: AppearanceOverride = .system {
     didSet { applyAppearance() }
   }
@@ -144,7 +153,11 @@ final class HarnessModel: ObservableObject {
     backend.onSleepStatus = { [weak self] status in
       self?.sleepStatus = status
     }
+    backend.onNotificationPermission = { [weak self] permission in
+      self?.notificationPermission = permission
+    }
     sleepStatus = backend.sleepStatus
+    notificationPermission = backend.notificationPermission
     environmentReport = backend.environmentReport
     // `LaunchAtLogin.status()` shells out to `codesign`, so it is asked when the
     // settings window opens, not on every app launch.
@@ -424,6 +437,57 @@ final class HarnessModel: ObservableObject {
     var next = preferences
     next.patchPaths = next.patchPaths.filter { $0 != path }
     apply(next)
+  }
+
+  func update(autoRestart: Bool) {
+    var next = preferences
+    next.autoRestart = autoRestart
+    apply(next)
+  }
+
+  func update(notify: Bool) {
+    var next = preferences
+    next.notify = notify
+    // Asking is the point: turning the switch on is the only moment a permission
+    // prompt is expected, so the system is asked here and nowhere at launch.
+    if notify { backend.requestNotificationAuthorization() }
+    apply(next)
+  }
+
+  func refreshNotificationPermission() {
+    backend.refreshNotificationPermission()
+  }
+
+  func requestNotificationAuthorization() {
+    backend.requestNotificationAuthorization()
+  }
+
+  /// The AppDelegate owns the window stack, so the model forwards this the same
+  /// way it forwards the global shortcut: one place knows about AppKit panels.
+  var onRequestStart: (() -> Void)?
+
+  /// Clicking a notification lands here: the panel opens with the failure on it,
+  /// and pressing Start goes through the same click path a user would.
+  func handleNotificationActivation() {
+    refreshNotificationPermission()
+  }
+
+  func requestStart() {
+    if let onRequestStart {
+      onRequestStart()
+    } else {
+      start()
+    }
+  }
+
+  func openNotificationSettings() {
+    guard let url = URL(string: NotificationCenterClient.settingsURL) else { return }
+    NSWorkspace.shared.open(url)
+  }
+
+  /// Demo mode: banners on a review machine are noise, so the switch only moves.
+  func clearNotifications() {
+    backend.clearDeliveredNotifications()
   }
 
   func update(quitBehavior: QuitBehavior) {

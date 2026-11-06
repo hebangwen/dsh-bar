@@ -32,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     status.install()
     installHotKey()
     installShowPanelObserver()
+    installNotificationActivation()
 
     // The port may already serve a dsh someone started in a terminal; look once at
     // launch so the panel opens telling the truth.
@@ -151,12 +152,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       case .stopped, .failed: startFromPanel()
       case .listening: openLaunchURL()
       case .unavailable: chooseBinary()
-      case .starting, .stopping: break
+      case .starting, .stopping, .restarting: break
       }
     case .secondary:
       switch model.snapshot.phase {
       case .listening: model.stop()
-      case .starting: model.cancel()
+      case .starting, .restarting: model.cancel()
       case .failed:
         // The second button is the repair the diagnosis suggests; retry is the
         // first. Each recovery is one preference change away from a usable launch.
@@ -211,6 +212,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     panel.hide(returnFocus: false)
   }
 
+  /// A clicked banner is a request to look at the panel: it opens next to the
+  /// status item, which is where the diagnosis and the buttons are.
+  private func installNotificationActivation() {
+    model.onRequestStart = { [weak self] in
+      guard let self else { return }
+      self.panel.show(relativeTo: self.status.button)
+    }
+    NotificationCenterClient.system.onActivate = { [weak self] in
+      guard let self else { return }
+      NSApp.activate()
+      self.model.handleNotificationActivation()
+      self.panel.show(relativeTo: self.status.button)
+    }
+  }
+
   private func openSettings() {
     if settingsWindow == nil {
       let hosting = NSHostingView(rootView: SettingsView(model: model))
@@ -228,6 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     panel.hide(returnFocus: false)
     NSApp.activate()
+    model.refreshNotificationPermission()
     settingsWindow?.makeKeyAndOrderFront(nil)
 
     // `DSHBAR_SNAPSHOT_SETTINGS=<path>` renders the sheet offscreen, the same way
